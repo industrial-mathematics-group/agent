@@ -1,0 +1,28 @@
+# IMGAgent: the organisation's GitHub bot, as one small container.
+# Dockge: put this repository into the stacks folder (e.g. /opt/stacks/imgagent), copy .env.example to .env,
+# save the App's private key as imgagent.pem next to this file, then "Start". README.md has the details.
+services:
+  imgagent:
+    build: .
+    image: imgagent:local
+    container_name: imgagent
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      # GitHub must reach this port over HTTPS: put your reverse proxy in front of it (README, "Expose it").
+      # With the proxy on the same host, keep 127.0.0.1; without one, use "8080:8080".
+      - "127.0.0.1:${IMGAGENT_PORT:-8080}:8080"
+    secrets:
+      - imgagent_private_key
+    read_only: true
+    tmpfs:
+      - /tmp:size=2g        # the clones of the repositories (removed after each job) and git's config
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+secrets:
+  imgagent_private_key:
+    file: ./imgagent.pem
