@@ -89,7 +89,14 @@ class Context:
 
     def can_write(self, login: str) -> bool:
         p = self.api("GET", f"/repos/{self.repo}/collaborators/{login}/permission", ok404=True)
-        return bool(p) and p.get("permission") in ("admin", "maintain", "write")
+        permission = (p or {}).get("permission", "none")
+        ok = permission in ("admin", "maintain", "write")
+        log.info("%s has %s permission on %s%s", login, permission, self.repo, "" if ok else ": not answering")
+        return ok
+
+    def refuse(self, command: str) -> None:
+        """Tell someone without write access why nothing happens (once per command they write)."""
+        self.say(f"@{self.actor} `{command}` is only for people with write access to this repository.")
 
 
 def _run(cmd: list[str], cwd: Path, env: dict, timeout: int) -> subprocess.CompletedProcess:
@@ -140,7 +147,7 @@ def help_text(handle: str) -> str:
 
 def do_help(ctx: Context, job: Job) -> None:
     if not ctx.can_write(ctx.actor):
-        return
+        return   # no reply: "@IMGAgent" in any comment by anyone shouldn't make the bot talk
     lead = f"I don't know `{job.args['unknown']}`. " if job.args.get("unknown") else ""
     ctx.say(f"@{ctx.actor} {lead}{help_text(ctx.cfg.handle)}")
 
@@ -149,7 +156,7 @@ def do_help(ctx: Context, job: Job) -> None:
 
 def do_docs_ask(ctx: Context, job: Job) -> None:
     if not ctx.can_write(ctx.actor):
-        return
+        return ctx.refuse(f"@{ctx.cfg.handle} docs ask")
     question = job.args.get("question", "").strip()
     if not question:
         ctx.say(f"@{ctx.actor} write your question after `@{ctx.cfg.handle} docs ask`.")
@@ -231,7 +238,7 @@ AI-Review-Findings:
 
 def do_docs_write(ctx: Context, job: Job) -> None:
     if not ctx.can_write(ctx.actor):
-        return
+        return ctx.refuse(f"@{ctx.cfg.handle} docs {job.args['command']}")
     command, hint = job.args["command"], job.args.get("hint", "")
     command_text = f"@{ctx.cfg.handle} docs {command}"
     ctx.react()
@@ -358,6 +365,7 @@ def run(ctx: Context, job: Job) -> None:
              {k: v[:80] for k, v in job.args.items()})
     try:
         HANDLERS[job.kind](ctx, job)
+        log.info("%s for %s#%s finished", job.kind, ctx.repo, ctx.number)
     except Exception:
         log.exception("%s failed for %s#%s", job.kind, ctx.repo, ctx.number)
         try:

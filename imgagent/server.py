@@ -34,6 +34,22 @@ def verify(secret: bytes, body: bytes, signature: str | None) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
+def describe(event: str, payload: dict, handle: str) -> str:
+    """Why an event started nothing, for the log and for Recent Deliveries."""
+    sender = payload.get("sender") or {}
+    if sender.get("type") == "Bot":
+        return f"sent by the bot {sender.get('login')}"
+    if event not in ("issues", "issue_comment"):
+        return f"IMGAgent doesn't use {event} events"
+    text = ((payload.get("comment") or {}).get("body") if event == "issue_comment"
+            else (payload.get("issue") or {}).get("body")) or ""
+    start = " ".join(text.split())[:60]
+    if f"@{handle}".lower() not in text.lower():
+        return f"{event}.{payload.get('action')} by {sender.get('login')}: no @{handle} in {start!r}"
+    return (f"{event}.{payload.get('action')} by {sender.get('login')}: @{handle} found but no command "
+            f"(commands start the comment; signoff only in open issues) in {start!r}")
+
+
 class Dispatcher:
     """Routes events to jobs and runs them on a small pool; jobs with the same key run in order."""
 
@@ -56,13 +72,14 @@ class Dispatcher:
             return 200, "pong"
         owner = ((payload.get("repository") or {}).get("owner") or {}).get("login", "")
         if "installation" not in payload or not owner:
-            return 202, "ignored: no repository or installation"
+            return 202, f"ignored: {event} has no repository or installation"
         if "*" not in self.allowed and owner.lower() not in self.allowed:
-            log.warning("ignoring %s from %s: not in IMGAGENT_ALLOWED_OWNERS", event, owner)
-            return 202, "ignored: owner not allowed"
+            log.warning("ignoring %s from %s: not in IMGAGENT_ALLOWED_OWNERS=%s", event, owner,
+                        ",".join(sorted(self.allowed)))
+            return 202, f"ignored: owner {owner} is not in IMGAGENT_ALLOWED_OWNERS"
         job = commands.route(event, payload, self.cfg.handle, self.signoff_form)
         if job is None:
-            return 202, "ignored"
+            return 202, "ignored: " + describe(event, payload, self.cfg.handle)
         ctx = jobs.Context(self.app, self.cfg, event, payload)
         key = job.key(ctx.repo, ctx.number)
 
@@ -123,6 +140,34 @@ def private_key() -> str:
     return key.replace("\\n", "\n")   # one line in .env, with \n for the line breaks
 
 
+def check_app(app: github.App, cfg: jobs.Config, allowed: set[str]) -> None:
+    """Log what GitHub knows about the App, and warn about the settings that make commands go unanswered."""
+    info = github.request("GET", "/app", app.jwt())
+    events, perms = set(info.get("events") or []), info.get("permissions") or {}
+    log.info("signed in as the GitHub App %s; answering @%s", info["slug"], cfg.handle)
+    log.info("app events: %s; permissions: %s", ", ".join(sorted(events)) or "none",
+             ", ".join(f"{k}={v}" for k, v in sorted(perms.items())))
+    for name in ("issues", "issue_comment"):
+        if name not in events:
+            log.warning("the App is not subscribed to %r events: tick them under the App's settings → "
+                        "Permissions & events → Subscribe to events", name)
+    for name in ("contents", "issues", "pull_requests"):
+        if perms.get(name) != "write":
+            log.warning("the App lacks %s: write (has %s)", name, perms.get(name, "none"))
+    installs = github.request("GET", "/app/installations", app.jwt()) or []
+    accounts = {i["account"]["login"].lower(): i for i in installs}
+    log.info("installed on: %s", ", ".join(sorted(accounts)) or "nothing yet")
+    for owner in sorted(allowed - {"*"}):
+        if owner not in accounts:
+            log.warning("IMGAGENT_ALLOWED_OWNERS names %s, but the App isn't installed there", owner)
+    for login, inst in accounts.items():
+        missing = sorted({"issues", "issue_comment"} - set(inst.get("events") or []))
+        if missing:
+            log.warning("the installation on %s doesn't receive %s yet: an owner of %s must accept the App's "
+                        "updated permissions (Settings → GitHub Apps → IMGAgent → Review request)",
+                        login, ", ".join(missing), login)
+
+
 def main() -> None:
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), stream=sys.stdout,
                         format="%(asctime)s %(levelname)s %(threadName)s %(message)s")
@@ -136,12 +181,11 @@ def main() -> None:
 
     cfg = jobs.Config.from_env()
     app = github.App(os.environ["IMGAGENT_APP_ID"], key)
+    allowed = {o.strip().lower() for o in os.environ["IMGAGENT_ALLOWED_OWNERS"].split(",") if o.strip()}
     try:
-        slug, _ = app.identity()
-        log.info("signed in as the GitHub App %s; answering @%s", slug, cfg.handle)
+        check_app(app, cfg, allowed)
     except Exception as e:   # keep running: GitHub may be briefly unreachable
         log.error("could not reach GitHub as the app (check IMGAGENT_APP_ID and the private key): %s", e)
-    allowed = {o.strip().lower() for o in os.environ["IMGAGENT_ALLOWED_OWNERS"].split(",") if o.strip()}
     dispatcher = Dispatcher(app, cfg, allowed, int(os.environ.get("IMGAGENT_WORKERS", "2")),
                             os.environ.get("IMGAGENT_SIGNOFF_FORM", "true").lower() in ("1", "true", "yes"))
     port = int(os.environ.get("PORT", "8080"))

@@ -136,8 +136,8 @@ def test_server_end_to_end(running):
     assert post(port, full(comment("@IMGAgent docs make")), delivery="a") == (202, "queued docs-write")
     assert post(port, full(comment("@IMGAgent docs make")), delivery="a") == (200, "already handled")
     assert post(port, full(comment("@IMGAgent docs make"), owner="stranger"), delivery="b")[1] == \
-        "ignored: owner not allowed"
-    assert post(port, full(comment("hello")), delivery="c") == (202, "ignored")
+        "ignored: owner stranger is not in IMGAGENT_ALLOWED_OWNERS"
+    assert post(port, full(comment("hello")), delivery="c") == (202, "ignored: issue_comment.created by pascal: no @IMGAgent in 'hello'")
     d.pool.shutdown(wait=True)
     assert ran == [("industrial-mathematics-group/agent-sandbox", "docs-write")]
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz") as r:
@@ -207,3 +207,11 @@ def test_docs_write_opens_a_pull_request(monkeypatch, tmp_path):
     pr = next(b for m, p, b in calls if p.endswith("/pulls"))
     assert pr["head"] == branches[0] and pr["base"] == "main" and "make: added docs/new.md" in pr["body"]
     assert calls[-1][2]["body"].endswith("is ready for review: https://github.com/o/r/pull/9")
+
+
+def test_describe_says_why_nothing_happened():
+    d = server.describe
+    assert "no @IMGAgent" in d("issue_comment", comment("thanks"), C)
+    assert "found but no command" in d("issue_comment", comment("ping @IMGAgent docs make"), C)
+    assert "sent by the bot" in d("issue_comment", {**comment("x"), "sender": {"login": "b[bot]", "type": "Bot"}}, C)
+    assert "doesn't use push" in d("push", {"sender": {"login": "p", "type": "User"}}, C)
