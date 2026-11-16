@@ -130,6 +130,7 @@ def _docs_env(ctx: Context, clone: Path) -> dict:
         "DOCS_ABOUT": docs.get("about") or repo.get("description") or "",
         "DOCS_AUDIENCE": docs.get("audience", ""),
         "DOCS_URL": "" if url in ("", "none") else url,
+        "DOCS_REPO": ctx.repo,
     }
 
 
@@ -246,10 +247,6 @@ def do_docs_write(ctx: Context, job: Job) -> None:
     with tempfile.TemporaryDirectory(prefix="imgagent-") as tmp:
         clone = Path(tmp) / "repo"
         github.clone(ctx.repo, ctx.token(), clone, ref=ctx.default_branch)
-        if not (clone / "zensical.toml").is_file():
-            ctx.say(f"@{ctx.actor} `docs {command}` needs a Zensical site: `docs/` and a `zensical.toml` "
-                    "with a `nav = [ ... ]` block.")
-            return
         summary_file = Path(tmp) / "summary.md"
         env = {**_docs_env(ctx, clone), "DOCS_WRITER_MODEL": model,
                "DOCS_WRITER_EFFORT": ctx.cfg.docs_writer_effort, "SUMMARY_FILE": str(summary_file)}

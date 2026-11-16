@@ -118,7 +118,7 @@ Nothing to add. To move a repository over from the GitHub Actions bots, delete t
 (`docs-bot.yml`, `docs-writer.yml`, `.github/docs-bot/`, the Signoff-Assistant caller, and the Signoff-Request
 caller while `IMGAGENT_SIGNOFF_FORM=true`), so two bots don't answer the same thing.
 
-- `docs make` / `docs update` need a Zensical site: `docs/` and a `zensical.toml` with a `nav = [ ... ]` block.
+- `docs make` / `docs update` write a Zensical site: `docs/` and `zensical.toml`. Without them, `docs make` creates both (a complete `zensical.toml` with theme, Markdown extensions and nav); an existing `zensical.toml` keeps everything but its `nav`.
   `docs ask` only needs `docs/`.
 - `signoff` and the form need a `SIGNOFF.toml` (`aisignoff init`). The pull requests follow the organisation's
   PR template, so *PR-signoff* checks them; as an App's pull requests, they start the repository's checks.

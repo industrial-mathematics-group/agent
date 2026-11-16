@@ -12,7 +12,7 @@ Two commands, run by IMGAgent (imgagent/jobs.py) from an issue or PR comment
           full; pages for removed code can be deleted. Nav in zensical.toml follows.
 
 Run it locally, from the root of the repository to document (it edits the working tree;
-review with `git diff`). The repository needs docs/ and a zensical.toml with a nav block:
+review with `git diff`). Without docs/ or zensical.toml, both are created:
     pip install anthropic
     export ANTHROPIC_API_KEY=sk-ant-...
     python path/to/imgagent/docs/write_docs.py update ["optional hint for Claude"]
@@ -22,6 +22,7 @@ Environment:
     DOCS_PROJECT        the project's name, default the folder name of REPO_ROOT
     DOCS_ABOUT          one sentence on what the project is, default none
     DOCS_AUDIENCE       who reads the docs, default "people who use <project>"
+    DOCS_URL, DOCS_REPO site_url and owner/name for a new zensical.toml
     DOCS_WRITER_MODEL   model id, default claude-opus-5-5
     DOCS_WRITER_EFFORT  low | medium | high | xhigh | max, default medium
     SUMMARY_FILE        where to write a Markdown summary of the changes (PR body)
@@ -192,11 +193,16 @@ def check_path(path: str) -> str:
 # --- zensical.toml nav --------------------------------------------------------------------
 
 def read_nav() -> list:
-    return tomllib.loads(TOML_PATH.read_text(encoding="utf-8"))["project"]["nav"]
+    """The nav of zensical.toml; [] when the file or the key is missing."""
+    if not TOML_PATH.is_file():
+        return []
+    return tomllib.loads(TOML_PATH.read_text(encoding="utf-8")).get("project", {}).get("nav", [])
 
 
 def format_nav(nav: list) -> str:
     """Serialise nav in the layout zensical.toml already uses."""
+    if not nav:
+        return "nav = []"
     lines = ["nav = ["]
     for entry in nav:
         if isinstance(entry, str):
@@ -213,14 +219,148 @@ def format_nav(nav: list) -> str:
     return "\n".join(lines)
 
 
-def write_nav(nav: list) -> None:
-    text = TOML_PATH.read_text(encoding="utf-8")
-    new, count = re.subn(r"^nav = \[\n.*?^\]$", lambda _: format_nav(nav), text,
-                         count=1, flags=re.DOTALL | re.MULTILINE)
-    if count != 1:
-        raise RuntimeError("could not find the nav = [ ... ] block in zensical.toml")
-    tomllib.loads(new)  # never write a file Zensical can't read
+def nav_span(text: str) -> tuple[int, int] | None:
+    """Start and end of the "nav = [ ... ]" assignment in [project], in any layout (one line or many)."""
+    section = ""
+    pos = 0
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith("["):
+            section = stripped.split("#", 1)[0].strip()
+        elif section == "[project]" and re.match(r"nav\s*=\s*\[", stripped):
+            start = pos + line.index("nav")
+            i, depth, quote = text.index("[", start), 0, ""
+            while i < len(text):
+                c = text[i]
+                if quote:
+                    if c == "\\":
+                        i += 1
+                    elif c == quote:
+                        quote = ""
+                elif c in "\"'":
+                    quote = c
+                elif c == "#":
+                    i = text.find("\n", i)
+                    if i < 0:
+                        break
+                elif c == "[":
+                    depth += 1
+                elif c == "]":
+                    depth -= 1
+                    if depth == 0:
+                        return start, i + 1
+                i += 1
+            return None
+        pos += len(line)
+    return None
+
+
+SITE_TEMPLATE = """# Documentation site, built with Zensical (https://zensical.org), set up by the docs writer:
+#   pip install zensical && zensical serve      # preview on http://localhost:8000
+#   zensical build --clean                      # static site in site/
+[project]
+site_name = {name}
+site_description = {about}
+{urls}
+{nav}
+
+[project.theme]
+language = "en"
+features = [
+  "content.code.copy",
+  "content.tabs.link",
+  "navigation.footer",
+  "navigation.indexes",
+  "navigation.instant",
+  "navigation.path",
+  "navigation.sections",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+  "toc.follow",
+]
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+
+[project.markdown_extensions]
+abbr = {{}}
+admonition = {{}}
+attr_list = {{}}
+def_list = {{}}
+footnotes = {{}}
+md_in_html = {{}}
+tables = {{}}
+toc.permalink = true
+pymdownx.betterem = {{}}
+pymdownx.details = {{}}
+pymdownx.highlight.anchor_linenums = true
+pymdownx.highlight.pygments_lang_class = true
+pymdownx.inlinehilite = {{}}
+pymdownx.keys = {{}}
+pymdownx.magiclink = {{}}
+pymdownx.smartsymbols = {{}}
+pymdownx.superfences.custom_fences = [
+  {{ name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" }},
+]
+pymdownx.tabbed.alternate_style = true
+pymdownx.tabbed.combine_header_slug = true
+"""
+
+
+def new_site(nav: list) -> str:
+    """A complete zensical.toml for a repository that has none (the features the pages may use)."""
+    repo = os.environ.get("DOCS_REPO", "")
+    url = os.environ.get("DOCS_URL", "")
+    urls = []
+    if url:
+        urls.append(f"site_url = {json.dumps(url)}")
+    if repo:
+        urls += [f"repo_url = {json.dumps('https://github.com/' + repo)}", f"repo_name = {json.dumps(repo)}"]
+    return SITE_TEMPLATE.format(name=json.dumps(PROJECT), about=json.dumps(ABOUT or PROJECT),
+                                urls="\n".join(urls), nav=format_nav(nav))
+
+
+def write_nav(nav: list) -> str:
+    """Put nav into zensical.toml: replace the block, add it to [project], or create the file.
+
+    Returns what it did, for the summary. Never writes a file that TOML or Zensical's nav can't read.
+    """
+    block = format_nav(nav)
+    if not TOML_PATH.is_file():
+        new, did = new_site(nav), "Created `zensical.toml` (site settings, theme, Markdown extensions, nav)."
+    else:
+        text = TOML_PATH.read_text(encoding="utf-8")
+        span = nav_span(text)
+        if span:
+            new, did = text[:span[0]] + block + text[span[1]:], ""
+        elif m := re.search(r"^\[project\][ \t]*(#.*)?$", text, re.MULTILINE):
+            end = m.end() + 1 if text[m.end():m.end() + 1] == "\n" else m.end()
+            new = text[:end] + block + "\n" + text[end:]
+            did = "Added the `nav` to `[project]` in `zensical.toml`."
+        else:
+            new = f"[project]\n{block}\n\n" + text
+            did = "Added a `[project]` table with the `nav` to `zensical.toml`."
+    if tomllib.loads(new).get("project", {}).get("nav") != nav:
+        raise RuntimeError("the new zensical.toml doesn't read back with the planned nav")
     TOML_PATH.write_text(new, encoding="utf-8")
+    return did
+
+
+def save_nav(nav: list, summary: list[str]) -> None:
+    """write_nav, but a failure only costs the nav, never the pages that were written."""
+    try:
+        if did := write_nav(nav):
+            summary.append(f"\n{did}")
+    except Exception as e:   # noqa: BLE001 - the pages are worth more than the nav
+        print(f"Could not update the nav: {e}", file=sys.stderr)
+        summary.append(f"\n**The nav in `zensical.toml` could not be updated** ({e}). Set it by hand:\n\n"
+                       f"```toml\n{format_nav(nav)}\n```")
 
 
 def nav_paths(nav: list) -> list[str]:
@@ -324,13 +464,12 @@ def make(writer: DocsWriter, hint: str) -> list[str]:
         else:
             sections[page["section"]] = [page["path"]]
             nav.append({page["section"]: sections[page["section"]]})
-    write_nav(nav)
-
     summary = [f"Rebuilt the documentation from the code: {len(written)} pages."]
     summary += [f"- `docs/{p['path']}`: {p['brief']}" for p in plan]
     if removed:
         summary.append("\nRemoved pages that are not in the new plan:")
         summary += [f"- `docs/{r}`" for r in removed]
+    save_nav(nav, summary)
     return summary
 
 
@@ -487,7 +626,7 @@ def update(writer: DocsWriter, hint: str) -> list[str]:
                      "once), please check this page by hand.")
         summary.append(line)
     if nav != read_nav():
-        write_nav(nav)
+        save_nav(nav, summary)
     return summary
 
 
@@ -523,6 +662,9 @@ def main() -> None:
     if len(sys.argv) < 2 or sys.argv[1] not in ("make", "update"):
         sys.exit("usage: write_docs.py make|update [hint for Claude]")
     command, hint = sys.argv[1], " ".join(sys.argv[2:]).strip()
+    note = ""
+    if command == "update" and not any(DOCS_DIR.rglob("*.md")):
+        command, note = "make", "There were no pages in docs/ yet, so this built them from scratch (as `docs make`).\n\n"
 
     code = load_code()
     parts = [code] if command == "make" else [code, load_docs()]
@@ -536,7 +678,7 @@ def main() -> None:
     usage = (f"{MODEL}, effort {EFFORT}: {u['input']:,} input, {u['cache_write']:,} cache write, "
              f"{u['cache_read']:,} cache read, {u['output']:,} output tokens")
     print(usage, file=sys.stderr)
-    text = "\n".join(summary) if summary else "The docs match the code; nothing to change."
+    text = note + ("\n".join(summary) if summary else "The docs match the code; nothing to change.")
     text += f"\n\n<sub>{usage}</sub>\n"
     if summary_file := os.environ.get("SUMMARY_FILE"):
         Path(summary_file).write_text(text, encoding="utf-8")
