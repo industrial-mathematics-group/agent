@@ -244,6 +244,8 @@ def do_docs_write(ctx: Context, job: Job) -> None:
     command_text = f"@{ctx.cfg.handle} docs {command}"
     ctx.react()
     model = ctx.cfg.docs_writer_model
+    # Who commits, before the long Claude run: a problem here should cost seconds, not the written pages.
+    slug, bot_id = ctx.app.identity(ctx.token())
     with tempfile.TemporaryDirectory(prefix="imgagent-") as tmp:
         clone = Path(tmp) / "repo"
         github.clone(ctx.repo, ctx.token(), clone, ref=ctx.default_branch)
@@ -261,7 +263,6 @@ def do_docs_write(ctx: Context, job: Job) -> None:
         if not git("status", "--porcelain", "--", "docs", "zensical.toml").stdout.strip():
             ctx.say(f"@{ctx.actor} `docs {command}`: {summary.splitlines()[0] if summary else 'nothing to change.'}")
             return
-        slug, bot_id = ctx.app.identity()
         bot = f"{slug}[bot]"
         branch = f"{slug}/docs-{command}-{secrets.token_hex(4)}"
         comment_url = ctx.comment["html_url"]
@@ -290,7 +291,7 @@ def _actions_env(ctx: Context, tmp: Path, token: str) -> dict:
     """What a GitHub Actions run would give the signoff scripts."""
     event = tmp / "event.json"
     event.write_text(json.dumps(ctx.payload), encoding="utf-8")
-    slug, _ = ctx.app.identity()
+    slug, _ = ctx.app.identity(token)
     return {"GITHUB_EVENT_PATH": str(event), "GITHUB_REPOSITORY": ctx.repo, "GITHUB_TOKEN": token,
             "GITHUB_API_URL": "https://api.github.com", "GITHUB_SERVER_URL": "https://github.com",
             "APP_SLUG": slug}

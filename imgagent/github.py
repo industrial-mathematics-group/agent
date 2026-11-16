@@ -24,12 +24,13 @@ class GitHubError(RuntimeError):
         self.status = status
 
 
-def request(method: str, path: str, token: str, body: dict | None = None, *, auth: str = "Bearer",
+def request(method: str, path: str, token: str | None, body: dict | None = None, *, auth: str = "Bearer",
             ok404: bool = False):
     url = path if path.startswith("http") else API + path
     req = urllib.request.Request(url, method=method,
                                  data=json.dumps(body).encode() if body is not None else None)
-    req.add_header("Authorization", f"{auth} {token}")
+    if token:   # no token: an unauthenticated request, for public data
+        req.add_header("Authorization", f"{auth} {token}")
     req.add_header("Accept", "application/vnd.github+json")
     req.add_header("X-GitHub-Api-Version", "2022-11-28")
     req.add_header("User-Agent", "IMGAgent")
@@ -67,12 +68,17 @@ class App:
         r = request("POST", f"/app/installations/{installation_id}/access_tokens", self.jwt(), body)
         return r["token"]
 
-    def identity(self) -> tuple[str, int]:
-        """The app's slug and the numeric id of its bot user, for commits as <slug>[bot]."""
+    def identity(self, token: str | None = None) -> tuple[str, int]:
+        """The app's slug (e.g. "img-agent") and the numeric id of its bot user, for commits as <slug>[bot].
+
+        /app takes the app's JWT; /users/... doesn't (401 Bad credentials), so the bot user is looked up
+        with an installation token if one is given, else without authentication (it is public).
+        """
         with self._lock:
             if self._slug is None:
                 self._slug = request("GET", "/app", self.jwt())["slug"]
-                self._bot_id = request("GET", f"/users/{self._slug}%5Bbot%5D", self.jwt())["id"]
+            if self._bot_id is None:
+                self._bot_id = request("GET", f"/users/{self._slug}%5Bbot%5D", token)["id"]
             return self._slug, self._bot_id
 
 

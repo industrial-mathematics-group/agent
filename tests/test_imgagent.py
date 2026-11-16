@@ -148,7 +148,7 @@ class FakeApp:
     def installation_token(self, installation, repo=None):
         return "tok"
 
-    def identity(self):
+    def identity(self, token=None):
         return "imgagent", 42
 
 
@@ -215,3 +215,18 @@ def test_describe_says_why_nothing_happened():
     assert "found but no command" in d("issue_comment", comment("ping @IMGAgent docs make"), C)
     assert "sent by the bot" in d("issue_comment", {**comment("x"), "sender": {"login": "b[bot]", "type": "Bot"}}, C)
     assert "doesn't use push" in d("push", {"sender": {"login": "p", "type": "User"}}, C)
+
+
+def test_identity_never_sends_the_jwt_to_users(monkeypatch):
+    from imgagent import github
+    seen = []
+
+    def fake(method, path, token, body=None, **kw):
+        seen.append((path, token))
+        return {"slug": "img-agent"} if path == "/app" else {"id": 7}
+    monkeypatch.setattr(github, "request", fake)
+    app = github.App("1", "key")
+    monkeypatch.setattr(app, "jwt", lambda: "JWT")
+    assert app.identity("INST") == ("img-agent", 7)
+    assert seen == [("/app", "JWT"), ("/users/img-agent%5Bbot%5D", "INST")]
+    assert app.identity() == ("img-agent", 7) and len(seen) == 2   # cached
