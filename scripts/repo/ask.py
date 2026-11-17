@@ -1,20 +1,21 @@
-"""Answer a question about one folder (or file) of a repository with Claude, e.g. docs/ or src/.
+"""Answer a question about some folders (or files) of a repository with Claude, e.g. docs/ and src/.
 
-Every tracked text file under the target goes into the system prompt, so there is no search or
+Every tracked text file under them goes into the system prompt, so there is no search or
 vector database: Claude reads all of it on each call. Prompt caching makes the repeated files
 cheap when questions about the same target come in within a few minutes of each other.
 
 Run it locally, from the root of the repository:
     pip install anthropic
     export ANTHROPIC_API_KEY=sk-ant-...
-    TARGET=docs python path/to/imgagent/scripts/repo/ask.py "How do I add a host to the allowlist?"
+    TARGETS=docs,src python path/to/imgagent/scripts/repo/ask.py "How do I add a host to the allowlist?"
 
-In IMGAgent (imgagent/jobs.py, started by "@IMGAgent ask <target> <question>") the question comes
+In IMGAgent (imgagent/jobs.py, started by "@IMGAgent ask <folders> [with <folders>]") the question comes
 from the QUESTION environment variable and the answer is written to the file in ANSWER_FILE.
 
 Environment:
     REPO_ROOT          the repository, default the current directory
-    TARGET             the folder or file to answer from, relative to REPO_ROOT, default docs
+    TARGETS, CONTEXT   comma-separated folders or files to answer from, relative to REPO_ROOT;
+                       both are read the same way, default docs
     DOCS_PROJECT       the project's name, default the folder name of REPO_ROOT
     DOCS_ABOUT         one sentence on what the project is, default none
     DOCS_URL           the published docs site; answers from docs/ link to its pages
@@ -27,10 +28,12 @@ from pathlib import Path
 
 import anthropic
 
-from common import TooLarge, as_xml, select
+from common import TooLarge, as_xml, paths_from_env, select
 
 REPO_ROOT = Path(os.environ.get("REPO_ROOT") or Path.cwd()).resolve()
-TARGET = (os.environ.get("TARGET") or "docs").strip("/")
+# What to read: TARGETS and CONTEXT, both comma-separated; for ask they mean the same.
+PATHS = (paths_from_env("TARGETS") + paths_from_env("CONTEXT")) or ["docs"]
+NAMES = ", ".join(f"`{p}`" for p in PATHS)
 PROJECT = os.environ.get("DOCS_PROJECT") or REPO_ROOT.name
 ABOUT = os.environ.get("DOCS_ABOUT", "").strip()
 DOCS_URL = os.environ.get("DOCS_URL", "").strip().rstrip("/")
@@ -45,12 +48,12 @@ def instructions() -> str:
     cite = (f"""\
 - Name the pages you used, as links of the form {DOCS_URL}/<path>/ where <path> is the
   page's path under docs/ without ".md" (and without "/index" for index pages).
-""" if DOCS_URL and TARGET == "docs" else """\
+""" if DOCS_URL and PATHS == ["docs"] else """\
 - Name the files you used, by their path in the repository (and line or function names
   where that helps).
 """)
     return f"""\
-You answer questions about {NAMED}. The contents of `{TARGET}` in its
+You answer questions about {NAMED}. The contents of {NAMES} in its
 repository follow below, one file per <file> element.
 
 - Answer from these files only. If they do not cover the question, say so plainly and
@@ -63,11 +66,11 @@ repository follow below, one file per <file> element.
 
 def ask(question: str, client: anthropic.Anthropic | None = None) -> str:
     try:
-        files = select(REPO_ROOT, TARGET)
+        files = select(REPO_ROOT, PATHS)
     except TooLarge as e:
         return str(e)
     if not files:
-        return f"There are no text files in `{TARGET}` to answer from."
+        return f"There are no text files in {NAMES} to answer from."
     client = client or anthropic.Anthropic()  # reads ANTHROPIC_API_KEY
     response = client.messages.create(
         model=MODEL,
@@ -85,7 +88,7 @@ def ask(question: str, client: anthropic.Anthropic | None = None) -> str:
     )
 
     u = response.usage
-    print(f"target={TARGET} files={len(files)} model={response.model} stop={response.stop_reason} "
+    print(f"paths={','.join(PATHS)} files={len(files)} model={response.model} stop={response.stop_reason} "
           f"input={u.input_tokens} cache_write={u.cache_creation_input_tokens} "
           f"cache_read={u.cache_read_input_tokens} output={u.output_tokens}", file=sys.stderr)
 

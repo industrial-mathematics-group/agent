@@ -4,7 +4,7 @@ An optional file in a repository that tells IMGAgent more about the project when
 
 ## Where it is read
 
-IMGAgent reads `.github/imgagent.toml` from its clone of the repository. For `ask` the clone is sparse and contains only the target folder and this file. For `update` and `make docs` it is a clone of the default branch. Only the `[docs]` table is used; other tables are ignored.
+IMGAgent reads `.github/imgagent.toml` from its clone of the repository. For `ask` the clone is sparse and contains only the folders it reads and this file. For `update` and `make docs` it is a clone of the default branch. Only the `[docs]` table is used; other tables are ignored.
 
 If the file is missing, IMGAgent uses the defaults below. If it is not valid TOML, IMGAgent logs a warning (`ignoring .github/imgagent.toml`) and uses the defaults.
 

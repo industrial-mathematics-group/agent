@@ -1,10 +1,10 @@
 """Write the documentation in docs/ from the code, with Claude.
 
-Run by IMGAgent (imgagent/jobs.py) for `@IMGAgent make docs [hint]` in an issue or PR comment,
+Run by IMGAgent (imgagent/jobs.py) for `@IMGAgent make docs [with <folders>]` in an issue or PR comment,
 which then opens a pull request. Claude plans the site (pages, sections, nav) from the code,
 then writes each page. Every Markdown page under docs/ is replaced, so hand-written pages are
 gone unless you keep them in the review. Small changes to existing pages are
-`@IMGAgent update docs <task>` instead (scripts/repo/update.py).
+`@IMGAgent update docs with src` and a task instead (scripts/repo/update.py).
 
 Run it locally, from the root of the repository to document (it edits the working tree;
 review with `git diff`). Without docs/ or zensical.toml, both are created:
@@ -18,6 +18,7 @@ Environment:
     DOCS_ABOUT          one sentence on what the project is, default none
     DOCS_AUDIENCE       who reads the docs, default "people who use <project>"
     DOCS_URL, DOCS_REPO site_url and owner/name for a new zensical.toml
+    CONTEXT             comma-separated paths to document (plus the top-level files), default all code
     WRITER_MODEL        model id, default claude-opus-5-5
     WRITER_EFFORT       low | medium | high | xhigh | max, default medium
     SUMMARY_FILE        where to write a Markdown summary of the changes (PR body)
@@ -49,6 +50,8 @@ NAMED = f"{PROJECT}, {ABOUT}" if ABOUT else PROJECT
 
 MODEL = os.environ.get("WRITER_MODEL") or os.environ.get("DOCS_WRITER_MODEL") or "claude-opus-5-5"
 EFFORT = os.environ.get("WRITER_EFFORT") or os.environ.get("DOCS_WRITER_EFFORT") or "medium"
+# `make docs with src,examples`: document only these paths (plus the top-level files) instead of all the code.
+CONTEXT = [c.strip().strip("/") for c in os.environ.get("CONTEXT", "").split(",") if c.strip().strip("/")]
 WORKERS = 4  # page calls in parallel, after the first call has filled the cache
 
 # Files that are not code worth documenting: vendored wheels, the docs themselves, legal text.
@@ -82,11 +85,18 @@ def _git(*args: str) -> str:
                           check=True).stdout
 
 
+def in_context(rel: str) -> bool:
+    """With CONTEXT ("src,examples"), only those paths and the top-level files are read; else everything."""
+    if not CONTEXT:
+        return True
+    return "/" not in rel or any(rel == c or rel.startswith(c + "/") for c in CONTEXT)
+
+
 def load_code() -> str:
     """Every tracked text file except docs and vendored files, in a stable order (cache-safe)."""
     files = []
     for rel in sorted(_git("ls-files").splitlines()):
-        if rel.startswith("docs/") or any(fnmatch(Path(rel).name, p) for p in SKIP_NAMES):
+        if rel.startswith("docs/") or any(fnmatch(Path(rel).name, p) for p in SKIP_NAMES) or not in_context(rel):
             continue
         path = REPO_ROOT / rel
         if not path.is_file() or path.stat().st_size > MAX_FILE_BYTES:

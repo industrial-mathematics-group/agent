@@ -1,10 +1,13 @@
 """Turn a webhook event into at most one job. Pure functions, no network: easy to test.
 
-Commands are "@IMGAgent <action> <target> [text]":
+Commands are "@IMGAgent <action> <paths> [with <paths>] [text]":
 
-    ask <path> <question>     answer from the files under <path> (any folder or file, e.g. docs or src)
-    update <path> <task>      small edits to existing files under <path> and the top-level files
-    make docs [hint]          build the docs from the code (only "docs" for now)
+    ask <paths> [with <paths>]       answer from the files under the paths (folders or files, e.g. docs,src)
+    update <paths> [with <paths>]    small edits to existing files under the first paths and the top-level
+                                     files; the paths after "with" are read-only context
+    make docs [with <paths>]         build the docs from the code (all of it, or only the "with" paths)
+
+<paths> is a comma-separated list. The question, task or hint follows on the same line or below.
     signoff ...               the signoff assistant (anywhere in the text, see signoff_pattern)
     help
 """
@@ -61,29 +64,47 @@ def leading_command(text: str, handle: str) -> list[str] | None:
     return m.group(1).split() if m else None
 
 
-def _rest(text: str, handle: str, words: int) -> str:
-    """The text after "@<handle>" and the next `words` words, across lines."""
-    m = re.match(r"\s*@" + re.escape(handle) + r"(?![\w-])" + r"\s+\S+" * words, text, re.I)
-    return text[m.end():].strip() if m else ""
+# A comma-separated list of paths on one line ("docs", "docs,src", "docs, src/pkg"), and the whole spec:
+# "<targets> [with <context>]". "with" must be on the first line; the text may start there or below.
+_LIST = r"[^\s,]+(?:[ \t]*,[ \t]*[^\s,]+)*"
+_SPEC = r"[ \t]+(?P<targets>" + _LIST + r")(?:[ \t]+with[ \t]+(?P<context>" + _LIST + r"))?"
+USAGE = {"ask": "ask <folders> [with <folders>]", "update": "update <folders> [with <folders>]",
+         "make": "make docs [with <folders>]"}
 
 
-def action_job(action: str, target_word: str | None, rest: str) -> Job:
-    """The job for "<action> <target> <rest>", or help explaining what is wrong with it."""
-    usage = {"ask": "ask <folder> <question>", "update": "update <folder> <task>", "make": "make docs [hint]"}
-    if target_word is None:
-        return Job("help", {"problem": f"`{action}` needs a target: `{usage[action]}`."})
-    target = clean_target(target_word)
-    if target is None:
-        return Job("help", {"problem": f"`{target_word}` is not a path in this repository I can use: "
-                                       f"`{usage[action]}`, e.g. `docs` or `src/package`."})
+def _paths(raw: str | None) -> tuple[list[str], str | None]:
+    """The cleaned paths of a comma-separated list (no duplicates), or the first bad entry."""
+    out = []
+    for word in (raw or "").split(","):
+        word = word.strip()
+        if not word:
+            continue
+        path = clean_target(word)
+        if path is None:
+            return [], word
+        if path not in out:
+            out.append(path)
+    return out, None
+
+
+def action_job(action: str, targets_raw: str | None, context_raw: str | None, rest: str) -> Job:
+    """The job for "<action> <targets> [with <context>]" and its text, or help explaining what is wrong."""
+    usage = f"`{USAGE[action]}`, then the {dict(ask='question', update='task', make='hint')[action]}"
+    if not targets_raw:
+        return Job("help", {"problem": f"`{action}` needs a folder: {usage}."})
+    targets, bad = _paths(targets_raw)
+    context, bad2 = _paths(context_raw)
+    if bad or bad2:
+        return Job("help", {"problem": f"`{bad or bad2}` is not a path in this repository I can use: "
+                                       f"{usage}, e.g. `docs` or `src/package`."})
+    context = [c for c in context if c not in targets]
     if action == "make":
-        if target not in MAKE_TARGETS:
-            return Job("help", {"problem": f"`make` only knows `docs` for now, not `{target}`. "
-                                           f"To change existing files, use `update {target} <task>`."})
-        return Job("make", {"target": target, "hint": rest})
-    if action == "ask":
-        return Job("ask", {"target": target, "question": rest})
-    return Job("update", {"target": target, "task": rest})
+        if targets != list(MAKE_TARGETS):
+            return Job("help", {"problem": f"`make` only knows `docs` for now, not `{', '.join(targets)}`. "
+                                           f"To change existing files, use `update {','.join(targets)}`."})
+        return Job("make", {"targets": targets, "context": context, "hint": rest})
+    key = "question" if action == "ask" else "task"
+    return Job(action, {"targets": targets, "context": context, key: rest})
 
 
 def route(event: str, payload: dict, handle: str = "IMGAgent", signoff_form: bool = True) -> Job | None:
@@ -103,7 +124,11 @@ def route(event: str, payload: dict, handle: str = "IMGAgent", signoff_form: boo
         if words is not None:
             verb = words[0].lower() if words else ""
             if verb in ("ask", "update", "make"):
-                return action_job(verb, words[1] if len(words) > 1 else None, _rest(body, handle, 2))
+                head = re.match(r"\s*@" + re.escape(handle) + r"(?![\w-])[ \t]+\S+", body, re.I)
+                m = re.match(_SPEC, body[head.end():], re.I)
+                if not m:
+                    return action_job(verb, None, None, "")
+                return action_job(verb, m["targets"], m["context"], body[head.end() + m.end():].strip())
             if verb == "docs" and len(words) > 1 and words[1].lower() in ("ask", "update", "make"):
                 new = f"@{handle} {words[1].lower()} docs"
                 return Job("help", {"problem": f"commands are now action then target: `{new} ...`."})
@@ -118,10 +143,11 @@ def route(event: str, payload: dict, handle: str = "IMGAgent", signoff_form: boo
     if event == "issues":
         title = issue.get("title") or ""
         if action == "opened":
-            ask = re.compile(r"@" + _space(handle) + r"\s+ask\s+(\S+)", re.I)
+            ask = re.compile(r"@" + _space(handle) + r"\s+ask" + _SPEC, re.I)
             text = f"{title}\n\n{issue_body}"
             if m := ask.search(text):
-                job = action_job("ask", m.group(1), (text[:m.start()] + text[m.end():].lstrip(" \t")).strip())
+                job = action_job("ask", m["targets"], m["context"],
+                                 (text[:m.start()] + text[m.end():].lstrip(" \t")).strip())
                 return job if job.kind == "ask" else None
             if signoff.search(issue_body) and not is_form:
                 return Job("signoff")

@@ -139,11 +139,13 @@ def _docs_env(ctx: Context, clone: Path) -> dict:
 # ------------------------------------------------------------------------------------------- help
 
 def help_text(handle: str) -> str:
-    return (f"Commands for @{handle} (people with write access), as `@{handle} <action> <target>`:\n\n"
+    return (f"Commands for @{handle} (people with write access), as `@{handle} <action> <folders> [with <folders>]` "
+            f"and then the question, task or hint, on the same line or below. Folders are comma-separated "
+            f"(`docs,src`); the ones after `with` are only read.\n\n"
             f"| Command | What happens |\n|---|---|\n"
-            f"| `@{handle} ask <folder> <question>` | answers from the files in that folder, e.g. `ask docs` or `ask src` |\n"
-            f"| `@{handle} update <folder> <task>` | a small task over the existing files in that folder and the top-level files (no new files), as a pull request |\n"
-            f"| `@{handle} make docs [hint]` | rebuilds `docs/` from the code, as a pull request |\n"
+            f"| `@{handle} ask docs,src` and a question | answers from the files in those folders |\n"
+            f"| `@{handle} update docs with src` and a task | edits existing files in `docs` and at the top level (no new files), reading `src`, as a pull request |\n"
+            f"| `@{handle} make docs [with src]` and a hint | rebuilds `docs/` from the code (or only from `src`), as a pull request |\n"
             f"| `@{handle} signoff` and your words | records how files were made and reviewed: a `SIGNOFF.toml` pull request |\n"
             f"| `@{handle} help` | this list |")
 
@@ -155,6 +157,11 @@ def do_help(ctx: Context, job: Job) -> None:
     ctx.say(f"@{ctx.actor} {lead}{help_text(ctx.cfg.handle)}")
 
 
+def missing(clone: Path, paths: list[str]) -> list[str]:
+    """The paths that don't exist in the clone or lead outside it."""
+    return [p for p in paths if find_target(clone, p) is None]
+
+
 def find_target(clone: Path, target: str) -> Path | None:
     """The target inside the clone, or None when it doesn't exist or points outside it (a symlink)."""
     root = clone.resolve()
@@ -164,18 +171,29 @@ def find_target(clone: Path, target: str) -> Path | None:
     return path
 
 
-def in_scope(rel: str, target: str) -> bool:
-    """May `update <target>` change this file: under the target or at the top level, never a workflow."""
+def in_scope(rel: str, targets: list[str]) -> bool:
+    """May `update <targets>` change this file: under a target or at the top level, never a workflow."""
     if rel.startswith(".github/workflows/"):
         return False
-    return "/" not in rel or rel == target or rel.startswith(target + "/")
+    return "/" not in rel or any(rel == t or rel.startswith(t + "/") for t in targets)
+
+
+def spec(job: Job) -> str:
+    """"docs,src with tests" for messages."""
+    text = ",".join(job.args["targets"])
+    return text + (f" with {','.join(job.args['context'])}" if job.args.get("context") else "")
+
+
+def no_such(ctx: Context, gone: list[str], usage: str) -> None:
+    names = ", ".join(f"`{p}`" for p in gone)
+    ctx.say(f"@{ctx.actor} there is no {names} in this repository. Write `@{ctx.cfg.handle} {usage}`.")
 
 
 # -------------------------------------------------------------------------------------------- ask
 
 def do_ask(ctx: Context, job: Job) -> None:
-    target = job.args["target"]
-    command = f"@{ctx.cfg.handle} ask {target}"
+    paths = job.args["targets"] + job.args.get("context", [])
+    command = f"@{ctx.cfg.handle} ask {spec(job)}"
     if not ctx.can_write(ctx.actor):
         return ctx.refuse(command)
     question = job.args.get("question", "").strip()
@@ -185,19 +203,18 @@ def do_ask(ctx: Context, job: Job) -> None:
     ctx.react()
     with tempfile.TemporaryDirectory(prefix="imgagent-") as tmp:
         clone = Path(tmp) / "repo"
-        github.clone(ctx.repo, ctx.token(), clone, depth=1, sparse=[f"/{target}", "/.github/imgagent.toml"])
-        if find_target(clone, target) is None:
-            ctx.say(f"@{ctx.actor} there is no `{target}` in this repository. Write "
-                    f"`@{ctx.cfg.handle} ask <folder> <question>`, e.g. `ask docs` or `ask src`.")
-            return
+        github.clone(ctx.repo, ctx.token(), clone, depth=1,
+                     sparse=[f"/{p}" for p in paths] + ["/.github/imgagent.toml"])
+        if gone := missing(clone, paths):
+            return no_such(ctx, gone, "ask <folders>` and your question, e.g. `ask docs,src")
         answer = Path(tmp) / "answer.md"
-        env = {**_docs_env(ctx, clone), "TARGET": target, "QUESTION": question, "ANSWER_FILE": str(answer),
+        env = {**_docs_env(ctx, clone), "TARGETS": ",".join(paths), "QUESTION": question, "ANSWER_FILE": str(answer),
                "ASK_MODEL": ctx.cfg.ask_model}
         r = _run([sys.executable, str(SCRIPTS / "repo" / "ask.py")], clone, env, timeout=300)
         if r.returncode or not answer.is_file():
             raise RuntimeError("ask.py failed")
         ctx.say(answer.read_text(encoding="utf-8").strip()
-                + FOOTER.format(what=f"answered with {ctx.cfg.ask_model} from `{target}` in this repository"))
+                + FOOTER.format(what=f"answered with {ctx.cfg.ask_model} from {', '.join(f'`{p}`' for p in paths)} in this repository"))
 
 
 # ------------------------------------------------------------------------------ make and update
@@ -299,8 +316,8 @@ def _first_line(summary: str, fallback: str) -> str:
 
 
 def do_make(ctx: Context, job: Job) -> None:
-    target, hint = job.args["target"], job.args.get("hint", "")
-    command_text = f"@{ctx.cfg.handle} make {target}"
+    hint, context = job.args.get("hint", ""), job.args.get("context", [])
+    command_text = f"@{ctx.cfg.handle} make {spec(job)}"
     if not ctx.can_write(ctx.actor):
         return ctx.refuse(command_text)
     ctx.react()
@@ -310,7 +327,10 @@ def do_make(ctx: Context, job: Job) -> None:
         tmp = Path(tmp)
         clone = tmp / "repo"
         github.clone(ctx.repo, ctx.token(), clone, ref=ctx.default_branch)
-        summary = _run_writer(ctx, clone, tmp, SCRIPTS / "docs" / "write_docs.py", ["make", hint], {})
+        if gone := missing(clone, context):
+            return no_such(ctx, gone, "make docs with <folders>")
+        summary = _run_writer(ctx, clone, tmp, SCRIPTS / "docs" / "write_docs.py", ["make", hint],
+                              {"CONTEXT": ",".join(context)})
         paths = ["docs", "zensical.toml"]
         status = subprocess.run(["git", "-C", str(clone), "status", "--porcelain", "--", *paths],
                                 check=True, capture_output=True, text=True).stdout
@@ -324,8 +344,9 @@ def do_make(ctx: Context, job: Job) -> None:
 
 
 def do_update(ctx: Context, job: Job) -> None:
-    target, task = job.args["target"], job.args.get("task", "").strip()
-    command_text = f"@{ctx.cfg.handle} update {target}"
+    targets, context = job.args["targets"], job.args.get("context", [])
+    task = job.args.get("task", "").strip()
+    command_text = f"@{ctx.cfg.handle} update {spec(job)}"
     if not ctx.can_write(ctx.actor):
         return ctx.refuse(command_text)
     if not task:
@@ -338,29 +359,27 @@ def do_update(ctx: Context, job: Job) -> None:
         tmp = Path(tmp)
         clone = tmp / "repo"
         github.clone(ctx.repo, ctx.token(), clone, ref=ctx.default_branch)
-        if find_target(clone, target) is None:
-            ctx.say(f"@{ctx.actor} there is no `{target}` in this repository. Write "
-                    f"`@{ctx.cfg.handle} update <folder> <task>`, e.g. `update docs` or `update src`.")
-            return
+        if gone := missing(clone, targets + context):
+            return no_such(ctx, gone, "update <folders> [with <folders>]` and the task, e.g. `update docs with src")
         summary = _run_writer(ctx, clone, tmp, SCRIPTS / "repo" / "update.py", [],
-                              {"TARGET": target, "TASK": task})
+                              {"TARGETS": ",".join(targets), "CONTEXT": ",".join(context), "TASK": task})
         git = lambda *a: subprocess.run(["git", "-C", str(clone), *a], check=True, capture_output=True,
                                         text=True).stdout
         # Only edits of tracked files in scope get into the pull request: never new, deleted or other files.
         changed = git("diff", "--name-only", "-z", "--diff-filter=M").split("\0")
-        paths = [p for p in changed if p and in_scope(p, target)]
+        paths = [p for p in changed if p and in_scope(p, targets)]
         if stray := [p for p in git("diff", "--name-only", "-z").split("\0") if p and p not in paths]:
-            log.warning("update %s: leaving out changes outside its scope: %s", target, stray)
+            log.warning("update %s: leaving out changes outside its scope: %s", spec(job), stray)
         if not paths:
-            ctx.say(f"@{ctx.actor} `update {target}`: {_first_line(summary, 'nothing needed to change.')}")
+            ctx.say(f"@{ctx.actor} `update {spec(job)}`: {_first_line(summary, 'nothing needed to change.')}")
             return
         short = " ".join(task.split())
         short = short if len(short) <= 60 else short[:57].rstrip() + "..."
-        name = re.sub(r"[^a-z0-9]+", "-", target.lower()).strip("-")[:40] or "repo"
+        name = re.sub(r"[^a-z0-9]+", "-", "-".join(targets).lower()).strip("-")[:40] or "repo"
         _open_pr(ctx, clone, paths, slug=slug, bot_id=bot_id, branch=f"{slug}/update-{name}-{secrets.token_hex(4)}",
-                 title=f"{target}: {short}", command_text=command_text,
+                 title=f"{', '.join(targets)}: {short}", command_text=command_text,
                  summary=f"Task: {task}\n\n{summary}",
-                 review=f"Claude could only edit existing files in `{target}` and at the top level of the "
+                 review=f"Claude could only edit existing files in {', '.join(f'`{t}`' for t in targets)} and at the top level of the "
                         "repository. Review every change before merging: it can still be wrong.")
 
 

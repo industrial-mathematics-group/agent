@@ -45,7 +45,7 @@ Jobs with the same key run one after the other, even when workers are free:
 
 ## Temporary clones
 
-Each job works in its own temporary directory with a fresh clone of the repository, and the directory is deleted when the job ends. `ask` uses a shallow, sparse clone of only the target and `.github/imgagent.toml`. The other commands clone the repository fully.
+Each job works in its own temporary directory with a fresh clone of the repository, and the directory is deleted when the job ends. `ask` uses a shallow, sparse clone of only the folders it reads and `.github/imgagent.toml`. The other commands clone the repository fully.
 
 In the container, `/tmp` is a tmpfs of 2 GB and the root file system is read-only. See [Run the container](../getting-started/deploy.md).
 

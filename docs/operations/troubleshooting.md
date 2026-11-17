@@ -108,9 +108,9 @@ After you change an App's permissions or events, each installation owner must ac
 
 The person who wrote the command has no write, maintain or admin permission on the repository. Only such people are answered. For `help`, nobody without write access gets a reply at all, so that a stray `@IMGAgent` in a comment does not make the bot talk. For the signoff assistant, the same restriction is stated in its own wording.
 
-### `there is no <target> in this repository.`
+### `there is no <folder> in this repository.`
 
-`ask` and `update` need the folder you name to exist on the default branch. Check the spelling (paths are case sensitive), or run `@IMGAgent make docs` first for `docs`.
+Every folder you name, also after `with`, needs to exist on the default branch. Check the spelling (paths are case sensitive), or run `@IMGAgent make docs` first for `docs`.
 
 ### `IMGAgent couldn't finish this (<kind>). A maintainer can find the details in the IMGAgent server log.`
 

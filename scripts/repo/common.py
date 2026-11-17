@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from fnmatch import fnmatch
@@ -29,8 +30,13 @@ def tracked(root: Path) -> list[str]:
     return sorted(p for p in out.split("\0") if p)
 
 
-def in_target(rel: str, target: str) -> bool:
-    return rel == target or rel.startswith(target.rstrip("/") + "/")
+def in_target(rel: str, targets: list[str]) -> bool:
+    return any(rel == t or rel.startswith(t.rstrip("/") + "/") for t in targets)
+
+
+def paths_from_env(name: str) -> list[str]:
+    """A comma-separated list of repository paths from the environment ("docs,src")."""
+    return [p.strip().strip("/") for p in os.environ.get(name, "").split(",") if p.strip().strip("/")]
 
 
 def read_text(root: Path, rel: str) -> str | None:
@@ -49,19 +55,20 @@ def read_text(root: Path, rel: str) -> str | None:
         return None
 
 
-def select(root: Path, target: str, top_level: bool = False) -> dict[str, str]:
-    """The tracked text files under target (and, with top_level, those in the repository root), in a stable
-    order: the prompt cache matches byte for byte, so the same files must give the same text every time."""
+def select(root: Path, targets: list[str], top_level: bool = False) -> dict[str, str]:
+    """The tracked text files under the targets (and, with top_level, those in the repository root), in a
+    stable order: the prompt cache matches byte for byte, so the same files must give the same text every time."""
     files = {}
     for rel in tracked(root):
-        if in_target(rel, target) or (top_level and "/" not in rel):
+        if in_target(rel, targets) or (top_level and "/" not in rel):
             text = read_text(root, rel)
             if text is not None:
                 files[rel] = text
     size = sum(len(t) for t in files.values())
     if size > MAX_CONTEXT_CHARS:
-        raise TooLarge(f"`{target}` is too large to read at once: about {size // 4:,} tokens in {len(files)} "
-                       f"files, the limit is about {MAX_CONTEXT_CHARS // 4:,}. Name a smaller folder.")
+        names = ", ".join(f"`{t}`" for t in targets)
+        raise TooLarge(f"{names} is too large to read at once: about {size // 4:,} tokens in {len(files)} "
+                       f"files, the limit is about {MAX_CONTEXT_CHARS // 4:,}. Name smaller folders.")
     return files
 
 

@@ -7,9 +7,9 @@ IMGAgent needs no workflow files in the repositories it serves. Once the App is 
 | Command | What the repository needs |
 |---|---|
 | `@IMGAgent help` | Nothing. |
-| `@IMGAgent ask <folder> <question>` | The folder you name. Without it, IMGAgent replies that there is no such path. |
-| `@IMGAgent update <folder> <task>` | The folder you name, with the files to change already in it: `update` never creates files. |
-| `@IMGAgent make docs [hint]` | Nothing. It creates `docs/` and `zensical.toml` if they are missing. |
+| `@IMGAgent ask <folders>` and a question | The folders you name. If one is missing, IMGAgent replies that there is no such path. |
+| `@IMGAgent update <folders> [with <folders>]` and a task | The folders you name, with the files to change already in them: `update` never creates files. |
+| `@IMGAgent make docs [with <folders>]` | Nothing. It creates `docs/` and `zensical.toml` if they are missing. |
 | `@IMGAgent signoff` and the issue form *Signoff: declare or attest files* | A `SIGNOFF.toml` in the repository. |
 
 ### Documentation

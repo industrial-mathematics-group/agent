@@ -23,16 +23,25 @@ def comment(body, sender_type="User", pr=False, state="open", issue_body="text")
             "sender": {"login": "pascal", "type": sender_type}}
 
 
+def T(targets, context=(), **text):
+    return {"targets": list(targets), "context": list(context), **text}
+
+
 @pytest.mark.parametrize("body,kind,args", [
-    ("@IMGAgent ask docs How do I add a host?", "ask", {"target": "docs", "question": "How do I add a host?"}),
-    ("@imgagent  ASK src/ what does\n route do?", "ask", {"target": "src", "question": "what does\n route do?"}),
-    ("@IMGAgent ask ./src/pkg why?", "ask", {"target": "src/pkg", "question": "why?"}),
-    ("@IMGAgent ask .github what runs?", "ask", {"target": ".github", "question": "what runs?"}),
-    ("@IMGAgent make docs", "make", {"target": "docs", "hint": ""}),
-    ("@IMGAgent make docs/ focus on deployment\nand ops", "make", {"target": "docs", "hint": "focus on deployment\nand ops"}),
-    ("@IMGAgent update src require Python 3.13\nalso in CI", "update",
-     {"target": "src", "task": "require Python 3.13\nalso in CI"}),
-    ("@IMGAgent update docs", "update", {"target": "docs", "task": ""}),
+    ("@IMGAgent ask docs How do I add a host?", "ask", T(["docs"], question="How do I add a host?")),
+    ("@imgagent  ASK src/ what does\n route do?", "ask", T(["src"], question="what does\n route do?")),
+    ("@IMGAgent ask ./src/pkg why?", "ask", T(["src/pkg"], question="why?")),
+    ("@IMGAgent ask .github what runs?", "ask", T([".github"], question="what runs?")),
+    ("@IMGAgent ask docs,src\nHow does routing work?", "ask", T(["docs", "src"], question="How does routing work?")),
+    ("@IMGAgent ask docs , src/ ,docs how?", "ask", T(["docs", "src"], question="how?")),
+    ("@IMGAgent ask docs with src how?", "ask", T(["docs"], ["src"], question="how?")),
+    ("@IMGAgent ask docs\nwith what tool?", "ask", T(["docs"], question="with what tool?")),
+    ("@IMGAgent make docs", "make", T(["docs"], hint="")),
+    ("@IMGAgent make docs/ focus on deployment\nand ops", "make", T(["docs"], hint="focus on deployment\nand ops")),
+    ("@IMGAgent make docs with src, examples\nshort pages", "make", T(["docs"], ["src", "examples"], hint="short pages")),
+    ("@IMGAgent update src require Python 3.13\nalso in CI", "update", T(["src"], task="require Python 3.13\nalso in CI")),
+    ("@IMGAgent update docs WITH src,docs\nfix what is outdated", "update", T(["docs"], ["src"], task="fix what is outdated")),
+    ("@IMGAgent update docs,tests with src", "update", T(["docs", "tests"], ["src"], task="")),
     ("@IMGAgent help", "help", {"problem": ""}),
     ("@IMGAgent", "help", {"problem": ""}),
     ("@IMGAgent deploy now", "help", {"problem": "I don't know `deploy now`."}),
@@ -45,13 +54,15 @@ def test_routes_comments(body, kind, args):
 
 
 @pytest.mark.parametrize("body,problem", [
-    ("@IMGAgent ask", "needs a target"),
-    ("@IMGAgent update ../etc fix", "not a path"),
+    ("@IMGAgent ask", "needs a folder"),
+    ("@IMGAgent ask\ndocs how?", "needs a folder"),
+    ("@IMGAgent update ../etc fix", "`../etc` is not a path"),
     ("@IMGAgent ask /etc what?", "not a path"),
     ("@IMGAgent ask src/../.. what?", "not a path"),
-    ("@IMGAgent update .git/hooks x", "not a path"),
-    ("@IMGAgent ask src/* what?", "not a path"),
+    ("@IMGAgent update docs with .git/hooks x", "`.git/hooks` is not a path"),
+    ("@IMGAgent ask docs,src/* what?", "`src/*` is not a path"),
     ("@IMGAgent make src", "only knows `docs`"),
+    ("@IMGAgent make docs,src", "only knows `docs`"),
     ("@IMGAgent docs ask how?", "action then target: `@IMGAgent ask docs ...`"),
     ("@IMGAgent docs make", "`@IMGAgent make docs ...`"),
 ])
@@ -93,9 +104,11 @@ def issue_event(action, title="t", body="b", changes=None):
 
 def test_routes_issues():
     j = commands.route("issues", issue_event("opened", "@IMGAgent ask docs install?", "on arm64"), C)
-    assert j.kind == "ask" and j.args == {"target": "docs", "question": "install?\n\non arm64"}
+    assert j.kind == "ask" and j.args == T(["docs"], question="install?\n\non arm64")
     j = commands.route("issues", issue_event("opened", "How does routing work?", "@IMGAgent ask src please"), C)
-    assert j.args == {"target": "src", "question": "How does routing work?\n\nplease"}
+    assert j.args == T(["src"], question="How does routing work?\n\nplease")
+    j = commands.route("issues", issue_event("opened", "@IMGAgent ask docs,src with tests", "why?"), C)
+    assert j.args == T(["docs", "src"], ["tests"], question="why?")
     assert commands.route("issues", issue_event("opened", "@IMGAgent ask ../x y"), C) is None
     assert commands.route("issues", issue_event("opened", body="@IMGAgent signoff I wrote x"), C).kind == "signoff"
     form = "### What should be recorded?\n\nDeclare files"
@@ -244,7 +257,7 @@ def test_make_docs_opens_a_pull_request(monkeypatch, tmp_path):
     payload = comment("@IMGAgent make docs")
     payload["comment"]["html_url"] = "https://github.com/o/r/issues/7#c1"
     ctx, calls = fake_context(monkeypatch, tmp_path, payload, origin)
-    jobs.do_make(ctx, commands.Job("make", {"target": "docs", "hint": ""}))
+    jobs.do_make(ctx, commands.Job("make", T(["docs"], hint="")))
 
     branch, changed = branch_files(origin, "imgagent/make-docs-")
     assert changed[0] == "A\tdocs/new.md"
@@ -258,33 +271,38 @@ def test_make_docs_opens_a_pull_request(monkeypatch, tmp_path):
 
 def test_update_only_commits_edits_in_scope(monkeypatch, tmp_path):
     origin = make_origin(tmp_path, {"src/a.py": "V = 1\n", "lib/b.py": "V = 1\n", "pyproject.toml": "py = 3.12\n",
-                                    ".github/workflows/ci.yml": "py: 3.12\n", "src/gone.py": "x\n"})
+                                    ".github/workflows/ci.yml": "py: 3.12\n", "src/gone.py": "x\n",
+                                    "tests/t.py": "V = 1\n"})
     fake_script(tmp_path, monkeypatch, "repo/update.py",
-                "assert os.environ['TARGET'] == 'src' and os.environ['TASK'] == 'bump'\n"
-                "for rel in ('src/a.py', 'lib/b.py', 'pyproject.toml', '.github/workflows/ci.yml'):\n"
+                "assert os.environ['TARGETS'] == 'src,tests' and os.environ['CONTEXT'] == 'lib'\n"
+                "assert os.environ['TASK'] == 'bump'\n"
+                "for rel in ('src/a.py', 'tests/t.py', 'lib/b.py', 'pyproject.toml', '.github/workflows/ci.yml'):\n"
                 "    (root / rel).write_text('changed\\n')\n"
                 "(root / 'src' / 'new.py').write_text('new\\n')\n"
                 "(root / 'src' / 'gone.py').unlink()\n"
                 "pathlib.Path(os.environ['SUMMARY_FILE']).write_text('- bumped\\n')\n")
-    payload = comment("@IMGAgent update src bump")
+    payload = comment("@IMGAgent update src,tests with lib bump")
     payload["comment"]["html_url"] = "https://github.com/o/r/issues/7#c1"
     ctx, calls = fake_context(monkeypatch, tmp_path, payload, origin)
-    jobs.do_update(ctx, commands.Job("update", {"target": "src", "task": "bump"}))
+    jobs.do_update(ctx, commands.Job("update", T(["src", "tests"], ["lib"], task="bump")))
 
-    branch, changed = branch_files(origin, "imgagent/update-src-")
-    assert sorted(c for c in changed if c) == ["M\tpyproject.toml", "M\tsrc/a.py"]
+    branch, changed = branch_files(origin, "imgagent/update-src-tests-")
+    assert sorted(c for c in changed if c) == ["M\tpyproject.toml", "M\tsrc/a.py", "M\ttests/t.py"]
     pr = next(b for m, p, b in calls if p.endswith("/pulls"))
-    assert pr["title"] == "src: bump" and "Task: bump" in pr["body"] and "- bumped" in pr["body"]
+    assert "`update src,tests with lib` is ready" in calls[-1][2]["body"]
+    assert pr["title"] == "src, tests: bump" and "Task: bump" in pr["body"] and "- bumped" in pr["body"]
 
 
 def test_update_and_ask_check_the_target(monkeypatch, tmp_path):
     origin = make_origin(tmp_path, {"src/a.py": "V = 1\n"})
     ctx, calls = fake_context(monkeypatch, tmp_path, comment("@IMGAgent update lib x"), origin)
-    jobs.do_update(ctx, commands.Job("update", {"target": "lib", "task": "x"}))
-    assert "there is no `lib`" in calls[-1][2]["body"]
-    jobs.do_update(ctx, commands.Job("update", {"target": "src", "task": ""}))
+    jobs.do_update(ctx, commands.Job("update", T(["src"], ["lib", "doc"], task="x")))
+    assert "there is no `lib`, `doc` in this repository" in calls[-1][2]["body"]
+    jobs.do_update(ctx, commands.Job("update", T(["src"], task="")))
     assert "write what to do after `@IMGAgent update src`" in calls[-1][2]["body"]
-    jobs.do_ask(ctx, commands.Job("ask", {"target": "nope", "question": "why?"}))
+    jobs.do_ask(ctx, commands.Job("ask", T(["src", "nope"], question="why?")))
+    assert "there is no `nope`" in calls[-1][2]["body"]
+    jobs.do_make(ctx, commands.Job("make", T(["docs"], ["nope"], hint="")))
     assert "there is no `nope`" in calls[-1][2]["body"]
 
 
@@ -293,9 +311,10 @@ def test_find_target_and_scope(tmp_path):
     (tmp_path / "out").symlink_to("/etc")
     assert jobs.find_target(tmp_path, "src") == tmp_path / "src"
     assert jobs.find_target(tmp_path, "out") is None and jobs.find_target(tmp_path, "nope") is None
-    assert jobs.in_scope("src/a.py", "src") and jobs.in_scope("pyproject.toml", "src")
-    assert not jobs.in_scope("srcx/a.py", "src") and not jobs.in_scope("lib/a.py", "src")
-    assert not jobs.in_scope(".github/workflows/ci.yml", ".github")
+    assert jobs.in_scope("src/a.py", ["src"]) and jobs.in_scope("pyproject.toml", ["src"])
+    assert jobs.in_scope("tests/t.py", ["src", "tests"])
+    assert not jobs.in_scope("srcx/a.py", ["src"]) and not jobs.in_scope("lib/a.py", ["src"])
+    assert not jobs.in_scope(".github/workflows/ci.yml", [".github"])
 
 
 def test_describe_says_why_nothing_happened():

@@ -26,7 +26,7 @@ graph LR
 2. [Register the GitHub App](github-app.md). Set its permissions and events, choose the webhook URL and secret, generate the private key, and install the App on the repositories it should work in.
 3. [Run the container](deploy.md). Clone the repository, fill in `.env`, place the private key as `imgagent.pem`, and start the stack. The log should say `signed in as the GitHub App`.
 4. [Expose the webhook to GitHub](expose.md). Put a reverse proxy or tunnel in front of `127.0.0.1:8080`, then test with a redelivered `ping` and an `@IMGAgent help` comment.
-5. [Prepare a repository](per-repository.md). Most commands need nothing; `ask` and `update` need the folder you name and `signoff` needs a `SIGNOFF.toml`.
+5. [Prepare a repository](per-repository.md). Most commands need nothing; `ask` and `update` need the folders you name and `signoff` needs a `SIGNOFF.toml`.
 
 !!! note
     The webhook URL and secret are entered in the App's settings in step 2, before the server exists. Use the URL you plan to serve in step 4. The same secret goes into `.env` as `IMGAGENT_WEBHOOK_SECRET` in step 3.

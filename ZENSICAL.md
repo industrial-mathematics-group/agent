@@ -126,5 +126,5 @@ The site is then at `https://<owner>.github.io/<repo>/`; set that as `site_url`.
 ## With IMGAgent
 
 `@IMGAgent make docs` writes `docs/` and the `nav`, and creates a complete `zensical.toml` when there is
-none; an existing file keeps everything except `nav`. `@IMGAgent update docs <task>` makes small edits to existing pages.
+none; an existing file keeps everything except `nav`. `@IMGAgent update docs with src` and a task makes small edits to existing pages.
 Neither adds the Pages workflow (the App has no permission to change workflows): add it by hand once.

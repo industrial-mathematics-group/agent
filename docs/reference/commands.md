@@ -16,24 +16,33 @@ See [access control](allowed-owners.md) for the other checks that happen before 
 
 ## Overview
 
-Commands are written as `@IMGAgent <action> <target>`, followed by your question, task or hint.
+Commands are written as `@IMGAgent <action> <folders> [with <folders>]`, followed by your question, task or hint.
 
 | Command | Recognised | What happens |
 |---|---|---|
 | `@IMGAgent signoff <your words>` | Anywhere in a new issue or in a comment on an open issue; not in pull requests | Claude turns your words into the answers of the signoff form. IMGAgent opens a `SIGNOFF.toml` pull request, or asks what is missing |
-| `@IMGAgent ask <folder> <question>` | Start of a comment, or in the title or body of a new issue | Claude answers from the files in that folder, for example `docs` or `src` |
-| `@IMGAgent update <folder> <task>` | Start of a comment | Claude edits existing files in that folder and at the top level of the repository; IMGAgent opens a pull request |
-| `@IMGAgent make docs [hint]` | Start of a comment | Claude rebuilds `docs/` from the code; IMGAgent opens a pull request |
+| `@IMGAgent ask <folders> [with <folders>]` and a question | Start of a comment, or in the title or body of a new issue | Claude answers from the files in those folders, for example `docs` or `docs,src` |
+| `@IMGAgent update <folders> [with <folders>]` and a task | Start of a comment | Claude edits existing files in the folders and at the top level of the repository, reading the `with` folders; IMGAgent opens a pull request |
+| `@IMGAgent make docs [with <folders>]` and a hint | Start of a comment | Claude rebuilds `docs/` from the code, or only from the `with` folders; IMGAgent opens a pull request |
 | `@IMGAgent help` | Start of a comment | Lists the commands |
 | Issue form *Signoff: declare or attest files* | New, edited or reopened issue | IMGAgent opens the `SIGNOFF.toml` pull request without AI |
 
 "Start of a comment" means the first line of the comment begins with `@IMGAgent`. A mention further down is not a command, except for `signoff`.
 
-## Targets
+## Folders, `with` and the text
 
-The target is a folder or file of the repository, as a relative path: `docs`, `src`, `src/package` or `pyproject.toml`. A leading `./` and a trailing `/` are ignored. IMGAgent refuses targets with `..`, an absolute path, `.git` or glob characters, and answers with the list of commands and what is wrong. After cloning, the target must exist and must not lead outside the repository through a symlink; otherwise IMGAgent says there is no such path.
+```text
+@IMGAgent update docs with src
+The docs still describe the old commands. Bring them in line with the code.
+```
 
-Only tracked text files are read. Binary files, images, lock files, `LICENSE` and files over 200 kB are left out. If the files of a target add up to more than about 150k tokens, IMGAgent says so instead of answering: name a smaller folder.
+- **Folders** come right after the action, as a comma-separated list on the first line: `docs`, `docs,src` or `docs, src/package`. An entry can also be a file, such as `pyproject.toml`. A leading `./` and a trailing `/` are ignored, and duplicates are dropped.
+- **`with <folders>`**, on the same line, adds folders that Claude reads but may not change. For `ask` there is no difference between the two lists.
+- **The text**, which is the question, task or hint, follows on the same line or on the next lines. If it begins with the word "with", start it on the next line so it is not read as a list of folders.
+
+IMGAgent refuses folders with `..`, an absolute path, `.git` or glob characters, and answers with the list of commands and what is wrong. After cloning, every folder must exist and must not lead outside the repository through a symlink; otherwise IMGAgent names the folders it could not find.
+
+Only tracked text files are read. Binary files, images, lock files, `LICENSE` and files over 200 kB are left out. If the files of one command add up to more than about 150k tokens, IMGAgent says so instead of answering: name smaller folders.
 
 ## `help`
 
@@ -43,25 +52,34 @@ Only tracked text files are read. Binary files, images, lock files, `LICENSE` an
 
 ```text
 @IMGAgent ask docs How do I add a host to the allowlist?
-@IMGAgent ask src Where is the webhook signature checked?
+@IMGAgent ask docs,src
+Where is the webhook signature checked, and is that documented?
 ```
 
-Everything after the target is the question and may span several lines. In a new issue, the title and body are sent together as the question, and the phrase `@IMGAgent ask <folder>` can appear anywhere in them.
+In a new issue, the title and body are sent together as the question, and `@IMGAgent ask <folders>` can appear anywhere in them.
 
-IMGAgent adds an `eyes` reaction to your comment, takes a shallow clone of the repository containing only the target and `.github/imgagent.toml`, and posts Claude's answer as a comment. Claude only sees the target. Answers from `docs` link to the published pages when a site URL is known; answers from other folders name the files they used. The model is set by `ASK_MODEL`. If the question is empty, IMGAgent asks you to write one.
+IMGAgent adds an `eyes` reaction to your comment, takes a shallow clone of the repository containing only the folders and `.github/imgagent.toml`, and posts Claude's answer as a comment. Claude only sees those folders. Answers from `docs` alone link to the published pages when a site URL is known; other answers name the files they used. The model is set by `ASK_MODEL`. If the question is empty, IMGAgent asks you to write one.
 
 ## `update`
 
 ```text
-@IMGAgent update src require Python 3.13 instead of 3.12
-@IMGAgent update docs the install page moved to getting-started/install.md, fix the links
+@IMGAgent update src,tests require Python 3.13 instead of 3.12
+@IMGAgent update docs with src
+Fix what is outdated or missing compared with the code.
 ```
 
-`update` is for small tasks that touch several existing files. The text after the target, which may span several lines, is the task; it is required.
+`update` is for small tasks that touch several existing files. The task is required.
 
-Claude sees the target and the text files at the top level of the repository, such as `pyproject.toml` and `README.md`, and may only change those files. It is told never to create, delete or rename files, and the script can only apply find-and-replace edits to files it was given, so it cannot. Files under `.github/workflows/` are never changed, because the App may not push them. If the task needs a new file or a file outside this scope, the pull request says what is left to do.
+| | Claude reads | Claude may change |
+|---|---|---|
+| The folders before `with` | yes | existing files |
+| The text files at the top level of the repository, such as `pyproject.toml` and `README.md` | yes | existing files |
+| The folders after `with` | yes | no |
+| Files under `.github/workflows/` | when listed | no, the App may not push them |
 
-IMGAgent reacts with `eyes`, works in a clone of the default branch, and commits only the modified files in scope on a new branch named `<app-slug>/update-<target>-<random>`. It opens a pull request against the default branch, with the task and a list of the changed files and why, and posts the link where you asked. If nothing changed, it only comments with the summary.
+Claude is told never to create, delete or rename files, and the script can only apply find-and-replace edits to the files it may change, so it cannot. If the task needs a new file or a file it may not change, the pull request says what is left to do.
+
+IMGAgent reacts with `eyes`, works in a clone of the default branch, and commits only the modified files it may change on a new branch named `<app-slug>/update-<folders>-<random>`. It opens a pull request against the default branch, with the task and a list of the changed files and why, and posts the link where you asked. If nothing changed, it only comments with the summary.
 
 The model is set by `WRITER_MODEL` and `WRITER_EFFORT`.
 
@@ -69,12 +87,12 @@ The model is set by `WRITER_MODEL` and `WRITER_EFFORT`.
 
 ```text
 @IMGAgent make docs
-@IMGAgent make docs focus on deployment and operations
+@IMGAgent make docs with src,examples focus on deployment and operations
 ```
 
-`make` creates files, which depends much more on the task than `update`, so `docs` is the only target for now. An optional hint after `make docs` is passed to Claude as guidance.
+`make` creates files, which depends much more on the task than `update`, so `docs` is the only target for now. An optional hint is passed to Claude as guidance.
 
-Claude rebuilds the documentation from the code: it plans the pages, then writes each one. Markdown pages under `docs/` that are not in the new plan are removed, and the nav in `zensical.toml` follows (a complete `zensical.toml` is created when there is none).
+Claude rebuilds the documentation from the code: it plans the pages, then writes each one. Without `with`, it reads all tracked code outside `docs/`; with `with`, only those folders and the top-level files. Markdown pages under `docs/` that are not in the new plan are removed, and the nav in `zensical.toml` follows (a complete `zensical.toml` is created when there is none).
 
 IMGAgent reacts with `eyes`, works in a full clone of the default branch, and commits changes to `docs/` and `zensical.toml` on a new branch named `<app-slug>/make-docs-<random>`. It opens a pull request against the default branch and posts the link in the issue or pull request where you asked. If nothing changed, it only comments with the summary and opens no pull request.
 

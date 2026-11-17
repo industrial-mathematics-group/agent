@@ -30,16 +30,16 @@ def repo(tmp_path, monkeypatch):
 
 def test_select(repo):
     common = importlib.import_module("common")
-    assert list(common.select(repo, "src")) == ["src/a.py", "src/sub/b.py"]
-    assert list(common.select(repo, "src", top_level=True)) == ["pyproject.toml", "src/a.py", "src/sub/b.py"]
-    assert list(common.select(repo, ".github")) == [".github/workflows/ci.yml"]
+    assert list(common.select(repo, ["src"])) == ["src/a.py", "src/sub/b.py"]
+    assert list(common.select(repo, ["src"], top_level=True)) == ["pyproject.toml", "src/a.py", "src/sub/b.py"]
+    assert list(common.select(repo, ["docs", ".github"])) == [".github/workflows/ci.yml", "docs/i.md"]
 
 
 def test_select_refuses_too_much(repo, monkeypatch):
     common = importlib.import_module("common")
     monkeypatch.setattr(common, "MAX_CONTEXT_CHARS", 10)
-    with pytest.raises(common.TooLarge, match="Name a smaller folder"):
-        common.select(repo, "src")
+    with pytest.raises(common.TooLarge, match="Name smaller folders"):
+        common.select(repo, ["src"])
 
 
 def test_apply_edits(repo):
@@ -61,33 +61,42 @@ class FakeClaude:
 
 
 def test_update_only_edits_files_it_may(repo, monkeypatch):
-    monkeypatch.setenv("TARGET", "src")
+    monkeypatch.setenv("TARGETS", "src,.github")
+    monkeypatch.setenv("CONTEXT", "docs,src")
     update = importlib.import_module("update")
-    files = update.select(repo, "src", top_level=True)
-    files[".github/workflows/ci.yml"] = "python: 3.12\n"   # as if the target were .github
+    assert update.TARGETS == ["src", ".github"] and update.CONTEXT == ["docs"]
+    files = update.select(repo, update.TARGETS + update.CONTEXT, top_level=True)
+    editable, context = update.split(files, update.TARGETS)
+    assert list(editable) == ["pyproject.toml", "src/a.py", "src/sub/b.py"]
+    assert list(context) == [".github/workflows/ci.yml", "docs/i.md"]
+    text = update.blocks(editable, context)
+    assert text.index("src/a.py") < text.index("<context>") < text.index("docs/i.md")
+    assert "for reading only" in update.role(update.TARGETS, update.CONTEXT)
     plan = {"changes": [{"path": "src/a.py", "reason": "bump"}, {"path": "pyproject.toml", "reason": "bump"},
-                        {"path": "src/new.py", "reason": "create it"},
+                        {"path": "src/new.py", "reason": "create it"}, {"path": "docs/i.md", "reason": "bump"},
                         {"path": ".github/workflows/ci.yml", "reason": "bump"}],
             "note": "CI needs a change too."}
     edits = {"src/a.py": [{"find": "3.12", "replace": "3.13"}],
              "pyproject.toml": [{"find": ">=3.12", "replace": ">=3.13"}, {"find": "missing", "replace": "x"}]}
-    summary = "\n".join(update.update(FakeClaude(plan, edits), files, "require 3.13"))
+    summary = "\n".join(update.update(FakeClaude(plan, edits), files, editable, "require 3.13"))
     assert (repo / "src/a.py").read_text() == "PY = '3.13'\n"
     assert (repo / "pyproject.toml").read_text() == "requires-python = '>=3.13'\n"
     assert not (repo / "src/new.py").exists()
     assert (repo / ".github/workflows/ci.yml").read_text() == "python: 3.12\n"
     assert "**skipped** `src/new.py`: it is not one of the files I may change" in summary
     assert "**skipped** `.github/workflows/ci.yml`: it may not be changed" in summary
+    assert "**skipped** `docs/i.md`: it may not be changed" in summary and (repo / "docs/i.md").read_text() == "# Hi\n"
     assert "1 edit(s) could not be applied" in summary and summary.endswith("CI needs a change too.")
 
 
 def test_ask_cites_docs_pages_only_for_docs(repo, monkeypatch):
     monkeypatch.setenv("DOCS_URL", "https://o.github.io/r/")
-    monkeypatch.setenv("TARGET", "docs")
+    monkeypatch.setenv("TARGETS", "docs")
     ask = importlib.import_module("ask")
     assert "https://o.github.io/r/<path>/" in ask.instructions()
     sys.modules.pop("ask")
-    monkeypatch.setenv("TARGET", "src")
+    monkeypatch.setenv("CONTEXT", "src")
     ask = importlib.import_module("ask")
-    assert "by their path in the repository" in ask.instructions() and "`src`" in ask.instructions()
+    assert ask.PATHS == ["docs", "src"]
+    assert "by their path in the repository" in ask.instructions() and "`docs`, `src`" in ask.instructions()
     assert ask.MODEL == "claude-haiku-5-5"

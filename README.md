@@ -6,22 +6,38 @@ or a comment, GitHub sends the event to this server, and IMGAgent answers as `im
 | Command | Where | What happens |
 |---|---|---|
 | `@IMGAgent signoff` and your words | new issue or issue comment | Claude turns them into the answers of the signoff form; IMGAgent opens a `SIGNOFF.toml` pull request, or asks what is missing |
-| `@IMGAgent ask <folder> <question>` | start of a comment, or a new issue | Claude answers from the files in that folder, e.g. `ask docs` or `ask src` |
-| `@IMGAgent update <folder> <task>` | start of a comment | Claude carries out a small task by editing existing files in that folder and at the top level; IMGAgent opens a pull request |
-| `@IMGAgent make docs [hint]` | start of a comment | Claude rebuilds `docs/` from the code; IMGAgent opens a pull request |
+| `@IMGAgent ask <folders> [with <folders>]` and a question | start of a comment, or a new issue | Claude answers from the files in those folders, e.g. `ask docs` or `ask docs,src` |
+| `@IMGAgent update <folders> [with <folders>]` and a task | start of a comment | Claude carries out a small task by editing existing files in the folders and at the top level, reading the `with` folders; IMGAgent opens a pull request |
+| `@IMGAgent make docs [with <folders>]` and a hint | start of a comment | Claude rebuilds `docs/` from the code (or only from the `with` folders); IMGAgent opens a pull request |
 | `@IMGAgent help` | start of a comment | the list of commands |
 | the issue form *Signoff: declare or attest files* | new or edited issue | IMGAgent opens the `SIGNOFF.toml` pull request, without AI (`IMGAGENT_SIGNOFF_FORM`) |
 
-Commands are *action, then target*. The target is a folder (or file) of the repository, written as a relative
-path such as `docs`, `src` or `src/package`; it must exist, and `..`, absolute paths, `.git` and glob characters
-are refused. The text after the target, which may span several lines, is the question, task or hint.
+Commands are *action, folders, then text*:
 
-- `ask` reads only the target: every tracked text file in it (up to about 150k tokens; name a subfolder for more).
-- `update` reads the target plus the files at the top level of the repository (`pyproject.toml`, `README.md`, ...),
-  and may only *modify* those files: it never creates, deletes or renames one, and never touches
-  `.github/workflows/`. It is meant for small tasks over several files, such as `update src require Python 3.13`
-  or `update docs fix the links to the old install page`.
-- `make` creates files, which depends much more on the task, so it only knows `docs` for now.
+```
+@IMGAgent update docs with src
+the docs still describe the old commands; bring them in line with the code
+```
+
+- **Folders** are a comma-separated list of folders (or files) of the repository, as relative paths such as `docs`,
+  `src/package` or `pyproject.toml`; spaces around the commas are fine. Every folder must exist, and `..`, absolute
+  paths, `.git` and glob characters are refused.
+- **`with <folders>`** on the same line adds folders that Claude only reads. For `ask` it makes no difference.
+- **The text** (question, task or hint) may start on the same line or on the next one, and span several lines.
+  Start it on the next line if it begins with the word "with".
+
+| Command | Reads | May change |
+|---|---|---|
+| `ask docs,src` | `docs`, `src` | nothing |
+| `update src` | `src` and the top-level files (`pyproject.toml`, `README.md`, ...) | existing files among those, never `.github/workflows/` |
+| `update docs with src` | `docs`, the top-level files and `src` | existing files in `docs` and at the top level |
+| `make docs` | all the code | `docs/` and `zensical.toml`, creating and removing pages |
+| `make docs with src` | `src` and the top-level files | the same |
+
+`update` never creates, deletes or renames a file: it is for small tasks over several files, such as
+`update src` + "require Python 3.13" or `update docs with src` + "fix what is outdated". `make` creates files,
+which depends much more on the task, so it only knows `docs` for now. What one command reads is limited to about
+150k tokens; name smaller folders for more.
 
 Only people with write access to the repository are answered, never bots. Nothing is pushed to a default branch:
 every change is a pull request that a person reviews, ticks and merges. Repositories need no workflow files.
@@ -130,7 +146,7 @@ Nothing to add. To move a repository over from the GitHub Actions bots, delete t
 caller while `IMGAGENT_SIGNOFF_FORM=true`), so two bots don't answer the same thing.
 
 - `make docs` writes a Zensical site: `docs/` and `zensical.toml`. Without them, it creates both (a complete `zensical.toml` with theme, Markdown extensions and nav); an existing `zensical.toml` keeps everything but its `nav`.
-  `ask` and `update` only need the folder you name.
+  `ask` and `update` only need the folders you name.
 - `signoff` and the form need a `SIGNOFF.toml` (`aisignoff init`). The pull requests follow the organisation's
   PR template, so *PR-signoff* checks them; as an App's pull requests, they start the repository's checks.
 - Optional `.github/imgagent.toml` on the default branch, to tell Claude more than the repository description:
@@ -157,9 +173,9 @@ file `imgagent.pem` or `IMGAGENT_PRIVATE_KEY`), `IMGAGENT_ALLOWED_OWNERS`, `ANTH
 - Only people with write, maintain or admin permission are answered, never bots.
 - Comment text reaches the scripts as environment variables, never a shell. The repository's code is read, not
   run. The models have no tools: they return text or a fixed JSON schema, which the scripts check.
-- Targets are checked twice: by name when the command is read, and in the clone (it must exist and stay inside
-  the repository, also through symlinks). `update` commits only modified tracked files under its target or at the
-  top level; anything else the script left in the clone stays out of the pull request.
+- Folders are checked twice: by name when the command is read, and in the clone (they must exist and stay inside
+  the repository, also through symlinks). `update` commits only modified tracked files under its target folders or
+  at the top level, never the `with` folders; anything else the script left in the clone stays out of the pull request.
 - Each job works in a temporary clone that is deleted afterwards. The container runs as an unprivileged user on a
   read-only root file system; tokens are installation tokens that expire after an hour.
 - The Claude key and the private key live only in `.env` and `imgagent.pem` on the VPS; neither is in git.
