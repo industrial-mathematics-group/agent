@@ -292,7 +292,7 @@ def _open_pr(ctx: Context, clone: Path, paths: list[str], *, slug: str, bot_id: 
     git = lambda *a: subprocess.run(["git", "-C", str(clone), *a], check=True, capture_output=True, text=True)
     model = ctx.cfg.writer_model
     bot = f"{slug}[bot]"
-    comment_url = ctx.comment["html_url"]
+    comment_url = (ctx.comment or ctx.issue)["html_url"]   # a command in a new issue has no comment
     git("switch", "-c", branch)
     git("add", "-A", "--", *paths)
     git("-c", f"user.name={bot}", "-c", f"user.email={bot_id}+{bot}@users.noreply.github.com",

@@ -21,13 +21,17 @@ Commands are written as `@IMGAgent <action> <folders> [with <folders>]`, followe
 | Command | Recognised | What happens |
 |---|---|---|
 | `@IMGAgent signoff <your words>` | Anywhere in a new issue or in a comment on an open issue; not in pull requests | Claude turns your words into the answers of the signoff form. IMGAgent opens a `SIGNOFF.toml` pull request, or asks what is missing |
-| `@IMGAgent ask <folders> [with <folders>]` and a question | Start of a comment, or in the title or body of a new issue | Claude answers from the files in those folders, for example `docs` or `docs,src` |
-| `@IMGAgent update <folders> [with <folders>]` and a task | Start of a comment | Claude edits existing files in the folders and at the top level of the repository, reading the `with` folders; IMGAgent opens a pull request |
-| `@IMGAgent make docs [with <folders>]` and a hint | Start of a comment | Claude rebuilds `docs/` from the code, or only from the `with` folders; IMGAgent opens a pull request |
-| `@IMGAgent help` | Start of a comment | Lists the commands |
+| `@IMGAgent ask <folders> [with <folders>]` and a question | Anywhere in a comment, or in the title or body of a new issue | Claude answers from the files in those folders, for example `docs` or `docs,src` |
+| `@IMGAgent update <folders> [with <folders>]` and a task | Anywhere in a comment or a new issue | Claude edits existing files in the folders and at the top level of the repository, reading the `with` folders; IMGAgent opens a pull request |
+| `@IMGAgent make docs [with <folders>]` and a hint | Anywhere in a comment or a new issue | Claude rebuilds `docs/` from the code, or only from the `with` folders; IMGAgent opens a pull request |
+| `@IMGAgent help` | Anywhere in a comment or a new issue | Lists the commands |
 | Issue form *Signoff: declare or attest files* | New, edited or reopened issue | IMGAgent opens the `SIGNOFF.toml` pull request without AI |
 
-"Start of a comment" means the first line of the comment begins with `@IMGAgent`. A mention further down is not a command, except for `signoff`.
+A command is `@IMGAgent` followed directly by `ask`, `update`, `make` or `help`, on any line of a comment, or in the title or body of a new issue. The text before and after the command is the question, task or hint. `@IMGAgent:`, `@IMGAgent,`, `**@IMGAgent**` and `@IMGAgent[bot]` work too. Mentions in code (inline or a code block) and in quoted lines (`> ...`) are not commands, so quoting an earlier command doesn't run it again.
+
+A comment that starts with `@IMGAgent` but has no command after it gets the list of commands and what is wrong. A mention further down without a command gets no reply, so that "thanks @IMGAgent" stays quiet.
+
+Editing a comment runs its command only if the comment had no command that ran before, for example when you fix a typo in `@IMGAgent aks docs`. Editing a command that already ran does nothing; write a new comment instead.
 
 ## Folders, `with` and the text
 
@@ -36,7 +40,7 @@ Commands are written as `@IMGAgent <action> <folders> [with <folders>]`, followe
 The docs still describe the old commands. Bring them in line with the code.
 ```
 
-- **Folders** come right after the action, as a comma-separated list on the first line: `docs`, `docs,src` or `docs, src/package`. An entry can also be a file, such as `pyproject.toml`. A leading `./` and a trailing `/` are ignored, and duplicates are dropped.
+- **Folders** come right after the action, as a comma-separated list on the same line: `docs`, `docs,src` or `docs, src/package`. An entry can also be a file, such as `pyproject.toml`. A leading `./` and a trailing `/` are ignored, and duplicates are dropped.
 - **`with <folders>`**, on the same line, adds folders that Claude reads but may not change. For `ask` there is no difference between the two lists.
 - **The text**, which is the question, task or hint, follows on the same line or on the next lines. If it begins with the word "with", start it on the next line so it is not read as a list of folders.
 

@@ -57,13 +57,6 @@ def signoff_pattern(handle: str) -> re.Pattern:
     return re.compile(r"(?<![\w@/`])@" + _space(handle) + r"\s+signoff\b(?!-)", re.I)
 
 
-def leading_command(text: str, handle: str) -> list[str] | None:
-    """The words after "@<handle>" when a comment starts with it, else None."""
-    first = (text or "").lstrip().split("\n", 1)[0].strip()
-    m = re.match(r"@" + re.escape(handle) + r"(?![\w-])\s*(.*)$", first, re.I)
-    return m.group(1).split() if m else None
-
-
 # A comma-separated list of paths on one line ("docs", "docs,src", "docs, src/pkg"), and the whole spec:
 # "<targets> [with <context>]". "with" must be on the first line; the text may start there or below.
 _LIST = r"[^\s,]+(?:[ \t]*,[ \t]*[^\s,]+)*"
@@ -107,6 +100,53 @@ def action_job(action: str, targets_raw: str | None, context_raw: str | None, re
     return Job(action, {"targets": targets, "context": context, key: rest})
 
 
+_INVISIBLE = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff"), None)
+_FENCE = re.compile(r"^[ \t]*(```|~~~).*?^[ \t]*\1[^\n]*$", re.M | re.S)
+
+
+def normalise(text: str) -> str:
+    """Comment text as people meant it: no zero-width characters, plain spaces, \\n line ends."""
+    text = (text or "").translate(_INVISIBLE).replace("\u00a0", " ").replace("\r\n", "\n")
+    return text
+
+
+def _searchable(text: str) -> str:
+    """The text with code blocks and quoted lines blanked out (same length, so positions still match)."""
+    text = _FENCE.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), text)
+    return re.sub(r"(?m)^[ \t]*>.*$", lambda m: " " * len(m.group(0)), text)
+
+
+def find_command(text: str, handle: str) -> Job | None:
+    """The command in a comment or a new issue, wherever it is: "@IMGAgent <action> <folders> [with ...]" with
+    the rest of the text (before and after it) as the question, task or hint. Mentions in code or quotes don't
+    count. None when there is no command; help when the text starts with "@IMGAgent" but no command follows."""
+    text = normalise(text)
+    search = _searchable(text)
+    mention = r"(?<![\w@/`])\**@" + re.escape(handle) + r"(?:\[bot\])?(?![\w-])\**[:,]?"
+    m = re.search(mention + r"[ \t]+(?P<verb>ask|update|make|help)\b", search, re.I)
+    if m:
+        verb = m["verb"].lower()
+        if verb == "help":
+            return Job("help", {"problem": ""})
+        spec = re.match(_SPEC, text[m.end():], re.I)
+        if not spec:
+            return action_job(verb, None, None, "")
+        end = m.end() + spec.end()
+        rest = "\n\n".join(t for t in (text[:m.start()].strip(), text[end:].strip()) if t)
+        return action_job(verb, spec["targets"], spec["context"], rest)
+    # "@IMGAgent" starting the text with something else after it: say what's wrong instead of staying silent.
+    lead = re.match(r"\s*" + mention + r"\s*(.*)", search, re.I)
+    if lead is None:
+        return None
+    words = lead.group(1).split("\n", 1)[0].split()
+    verb = words[0].lower() if words else ""
+    if verb == "signoff":
+        return None   # the signoff assistant's own rules decide
+    if verb == "docs" and len(words) > 1 and words[1].lower() in ("ask", "update", "make"):
+        return Job("help", {"problem": f"commands are now action then target: `@{handle} {words[1].lower()} docs ...`."})
+    return Job("help", {"problem": f"I don't know `{' '.join(words[:2])}`." if verb else ""})
+
+
 def route(event: str, payload: dict, handle: str = "IMGAgent", signoff_form: bool = True) -> Job | None:
     action = payload.get("action")
     sender = payload.get("sender") or {}
@@ -118,38 +158,31 @@ def route(event: str, payload: dict, handle: str = "IMGAgent", signoff_form: boo
     is_pr = bool(issue.get("pull_request"))
     signoff = signoff_pattern(handle)
 
+    if event == "issue_comment" and action == "edited":
+        # Fixing a command by editing the comment runs it, once: only when the old text had no command that ran.
+        body = (payload.get("comment") or {}).get("body") or ""
+        before = ((payload.get("changes") or {}).get("body") or {}).get("from")
+        job = find_command(body, handle)
+        if before is None or not job or job.kind == "help":
+            return None
+        old = find_command(before, handle)
+        return job if old is None or old.kind == "help" else None
+
     if event == "issue_comment" and action == "created":
         body = (payload.get("comment") or {}).get("body") or ""
-        words = leading_command(body, handle)
-        if words is not None:
-            verb = words[0].lower() if words else ""
-            if verb in ("ask", "update", "make"):
-                head = re.match(r"\s*@" + re.escape(handle) + r"(?![\w-])[ \t]+\S+", body, re.I)
-                m = re.match(_SPEC, body[head.end():], re.I)
-                if not m:
-                    return action_job(verb, None, None, "")
-                return action_job(verb, m["targets"], m["context"], body[head.end() + m.end():].strip())
-            if verb == "docs" and len(words) > 1 and words[1].lower() in ("ask", "update", "make"):
-                new = f"@{handle} {words[1].lower()} docs"
-                return Job("help", {"problem": f"commands are now action then target: `{new} ...`."})
-            if verb != "signoff":
-                return Job("help", {"problem": f"I don't know `{' '.join(words[:2])}`." if verb not in ("", "help")
-                                    else ""})
-            # signoff: handled below, with the assistant's own rules
-        if signoff.search(body) and not is_pr and issue.get("state") == "open" and not is_form:
+        if job := find_command(body, handle):
+            return job
+        if signoff.search(normalise(body)) and not is_pr and issue.get("state") == "open" and not is_form:
             return Job("signoff")
         return None
 
     if event == "issues":
         title = issue.get("title") or ""
-        if action == "opened":
-            ask = re.compile(r"@" + _space(handle) + r"\s+ask" + _SPEC, re.I)
-            text = f"{title}\n\n{issue_body}"
-            if m := ask.search(text):
-                job = action_job("ask", m["targets"], m["context"],
-                                 (text[:m.start()] + text[m.end():].lstrip(" \t")).strip())
-                return job if job.kind == "ask" else None
-            if signoff.search(issue_body) and not is_form:
+        if action == "opened" and not is_form:
+            job = find_command(f"{title}\n\n{issue_body}", handle)
+            if job and job.kind != "help":
+                return job
+            if signoff.search(normalise(issue_body)):
                 return Job("signoff")
         if signoff_form and is_form and issue.get("state") == "open" and action in ("opened", "edited", "reopened"):
             if action != "edited" or "body" in (payload.get("changes") or {}):

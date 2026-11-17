@@ -338,3 +338,58 @@ def test_identity_never_sends_the_jwt_to_users(monkeypatch):
     assert app.identity("INST") == ("img-agent", 7)
     assert seen == [("/app", "JWT"), ("/users/img-agent%5Bbot%5D", "INST")]
     assert app.identity() == ("img-agent", 7) and len(seen) == 2   # cached
+
+
+@pytest.mark.parametrize("body,args", [
+    ("@IMGAgent ask docs how?", T(["docs"], question="how?")),               # non-breaking space
+    ("﻿​@IMGAgent ask docs how?", T(["docs"], question="how?")),        # invisible characters
+    ("Hi!\n\n@IMGAgent ask docs how?", T(["docs"], question="Hi!\n\nhow?")),      # not on the first line
+    ("Could you @IMGAgent update docs with src fix links", T(["docs"], ["src"], task="Could you\n\nfix links")),
+    ("@IMGAgent: ask docs how?", T(["docs"], question="how?")),
+    ("**@IMGAgent** ask docs how?", T(["docs"], question="how?")),
+    ("@IMGAgent[bot] ask docs how?", T(["docs"], question="how?")),
+    ("@IMGAgent ask docs\r\nhow?", T(["docs"], question="how?")),
+])
+def test_finds_commands_people_actually_write(body, args):
+    job = commands.route("issue_comment", comment(body), C)
+    assert job.kind in ("ask", "update") and job.args == args
+
+
+@pytest.mark.parametrize("body", [
+    "> @IMGAgent ask docs how?\n\nthanks",                     # a quote
+    "Use\n```\n@IMGAgent ask docs how?\n```",                  # a code block
+    "Write `@IMGAgent ask docs` to ask",                       # inline code
+    "thanks @IMGAgent",                                        # a mention, no command
+])
+def test_mentions_in_code_or_quotes_are_not_commands(body):
+    assert commands.route("issue_comment", comment(body), C) is None
+
+
+def test_new_issues_take_every_command():
+    j = commands.route("issues", issue_event("opened", "@IMGAgent update docs with src", "fix the links"), C)
+    assert j.kind == "update" and j.args == T(["docs"], ["src"], task="fix the links")
+    j = commands.route("issues", issue_event("opened", "Docs", "@IMGAgent make docs\nshort pages"), C)
+    assert j.kind == "make" and j.args == T(["docs"], hint="Docs\n\nshort pages")
+
+
+def test_editing_a_comment_into_a_command_runs_it_once():
+    def edited(new, old):
+        return {**comment(new), "action": "edited", "changes": {"body": {"from": old}}}
+    assert commands.route("issue_comment", edited("@IMGAgent ask docs how?", "@IMGAgent aks docs how?"), C).kind == "ask"
+    assert commands.route("issue_comment", edited("@IMGAgent ask docs how?", "how?"), C).kind == "ask"
+    assert commands.route("issue_comment", edited("@IMGAgent ask docs why?", "@IMGAgent ask docs how?"), C) is None
+    assert commands.route("issue_comment", edited("@IMGAgent aks docs", "x"), C) is None
+    assert commands.route("issue_comment", {**comment("@IMGAgent ask docs x"), "action": "edited"}, C) is None
+
+
+def test_update_from_a_new_issue_links_the_issue(monkeypatch, tmp_path):
+    origin = make_origin(tmp_path, {"src/a.py": "V = 1\n"})
+    fake_script(tmp_path, monkeypatch, "repo/update.py",
+                "(root / 'src' / 'a.py').write_text('V = 2\\n')\n"
+                "pathlib.Path(os.environ['SUMMARY_FILE']).write_text('- bumped\\n')\n")
+    payload = issue_event("opened", "@IMGAgent update src", "bump")
+    payload["issue"]["html_url"] = "https://github.com/o/r/issues/3"
+    ctx, calls = fake_context(monkeypatch, tmp_path, payload, origin)
+    jobs.do_update(ctx, commands.Job("update", T(["src"], task="bump")))
+    pr = next(b for m, p, b in calls if p.endswith("/pulls"))
+    assert "in https://github.com/o/r/issues/3" in pr["body"]
