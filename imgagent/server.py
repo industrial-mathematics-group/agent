@@ -46,8 +46,16 @@ def describe(event: str, payload: dict, handle: str) -> str:
     start = " ".join(text.split())[:60]
     if f"@{handle}".lower() not in text.lower():
         return f"{event}.{payload.get('action')} by {sender.get('login')}: no @{handle} in {start!r}"
-    return (f"{event}.{payload.get('action')} by {sender.get('login')}: @{handle} found but no command "
-            f"(commands start the comment; signoff only in open issues) in {start!r}")
+    action = payload.get("action")
+    where = f"{event}.{action} by {sender.get('login')}: @{handle} found"
+    if event == "issues" and action not in ("opened", "edited", "reopened"):
+        return f"{where}, but commands in an issue are only read when it is opened"
+    if action == "edited":
+        return f"{where}, but the edit didn't turn a comment without a command into one in {start!r}"
+    if action not in ("created", "opened"):
+        return f"{where}, but {event}.{action} events are not read"
+    return (f"{where} but no command: write `@{handle} <ask|update|make|help> ...` (not in code or a quote); "
+            f"signoff only in open issues; in {start!r}")
 
 
 class Dispatcher:

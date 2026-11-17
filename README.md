@@ -6,10 +6,10 @@ or a comment, GitHub sends the event to this server, and IMGAgent answers as `im
 | Command | Where | What happens |
 |---|---|---|
 | `@IMGAgent signoff` and your words | new issue or issue comment | Claude turns them into the answers of the signoff form; IMGAgent opens a `SIGNOFF.toml` pull request, or asks what is missing |
-| `@IMGAgent ask <folders> [with <folders>]` and a question | start of a comment, or a new issue | Claude answers from the files in those folders, e.g. `ask docs` or `ask docs,src` |
-| `@IMGAgent update <folders> [with <folders>]` and a task | start of a comment | Claude carries out a small task by editing existing files in the folders and at the top level, reading the `with` folders; IMGAgent opens a pull request |
-| `@IMGAgent make docs [with <folders>]` and a hint | start of a comment | Claude rebuilds `docs/` from the code (or only from the `with` folders); IMGAgent opens a pull request |
-| `@IMGAgent help` | start of a comment | the list of commands |
+| `@IMGAgent ask <folders> [with <folders>]` and a question | anywhere in a comment or a new issue | Claude answers from the files in those folders, e.g. `ask docs` or `ask docs,src` |
+| `@IMGAgent update <folders> [with <folders>]` and a task | anywhere in a comment or a new issue | Claude carries out a small task by editing existing files in the folders and at the top level, reading the `with` folders; IMGAgent opens a pull request |
+| `@IMGAgent make docs [with <folders>]` and a hint | anywhere in a comment or a new issue | Claude rebuilds `docs/` from the code (or only from the `with` folders); IMGAgent opens a pull request |
+| `@IMGAgent help` | anywhere in a comment or a new issue | the list of commands |
 | the issue form *Signoff: declare or attest files* | new or edited issue | IMGAgent opens the `SIGNOFF.toml` pull request, without AI (`IMGAGENT_SIGNOFF_FORM`) |
 
 Commands are *action, folders, then text*:
