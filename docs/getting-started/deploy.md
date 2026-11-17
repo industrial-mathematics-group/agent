@@ -1,97 +1,119 @@
 # Run the container
 
-IMGAgent runs as one container, built from this repository. This page covers starting it with Dockge or plain Docker Compose, what `compose.yaml` and the image do, and how to update it.
+IMGAgent runs as a single container built from this repository with Docker Compose. This page covers starting it with Dockge or plain `docker compose`, the settings it needs, and what the container is set up to do.
 
-Before you start, you need the App's ID, its webhook secret and its private key from [Register the GitHub App](github-app.md), and a Claude Console API key.
+Before you start, you need the App ID, the webhook secret and the downloaded private key from [Register and install the GitHub App](github-app.md), and a Claude Console API key.
 
-## Set up the stack folder
+## Get the code and the settings
 
-On the server, go to Dockge's stacks folder (by default `/opt/stacks`) and clone the repository:
+On the VPS, clone the repository into Dockge's stacks folder (by default `/opt/stacks`), then create `.env` and put the private key next to `compose.yaml`:
 
 ```bash
 cd /opt/stacks
 git clone https://github.com/IMGAgent/imgagent.git
 cd imgagent
-cp .env.example .env
+cp .env.example .env            # then fill it in (or in Dockge's env editor)
 cp ~/Downloads/imgagent.*.private-key.pem imgagent.pem
-chmod 644 imgagent.pem
+chmod 644 imgagent.pem          # the container runs as uid 10001 and must be able to read it
 ```
 
-The container runs as the unprivileged user with uid 10001. It must be able to read `imgagent.pem`, which is why the file needs mode 644.
+The key must be readable by the container user (uid 10001). If the container can't read it, the entry point stops with:
 
-Fill in `.env` with an editor, or with the env editor of the stack in Dockge. These four are required:
+```
+IMGAgent: can't read the private key at /run/secrets/imgagent_private_key
+```
+
+!!! warning
+    `.env` and `imgagent.pem` hold secrets. Both are listed in `.gitignore` and `.dockerignore`. Never commit them.
+
+### Required settings
+
+Fill in these four in `.env`:
 
 | Variable | Value |
 |---|---|
-| `IMGAGENT_APP_ID` | the App ID from the App's settings page |
+| `IMGAGENT_APP_ID` | the App ID shown at the top of the App's settings page |
 | `IMGAGENT_WEBHOOK_SECRET` | the webhook secret you entered in the App's settings |
-| `IMGAGENT_ALLOWED_OWNERS` | comma-separated accounts that are answered, e.g. `industrial-mathematics-group` |
+| `IMGAGENT_ALLOWED_OWNERS` | the accounts whose installations are answered, comma-separated, e.g. `industrial-mathematics-group` |
 | `ANTHROPIC_API_KEY` | a Claude Console API key, ideally in a workspace with a spend limit |
 
-The other variables are optional. See the [configuration reference](../reference/index.md).
+If any of them is missing, or the private key can't be found, the server exits at startup and lists what is missing, for example:
 
-!!! warning
-    Never commit `.env` or `imgagent.pem`. Both are listed in `.gitignore` and `.dockerignore`.
+```
+IMGAgent: missing settings: ANTHROPIC_API_KEY (see .env.example)
+```
+
+The other settings are optional. They are described in `.env.example` and in [Environment variables](../reference/index.md). For other ways to provide the key, see [Private key](../reference/private-key.md).
 
 ## Start it
 
 === "Dockge"
-    The stack `imgagent` appears in Dockge. If it does not, use *Scan Stacks Folder*. Press **Start**. The first start builds the image.
+    The stack `imgagent` appears in Dockge. If it doesn't, use *Scan Stacks Folder*. Press **Start**. The first start builds the image.
 
-=== "Compose"
+=== "Docker Compose"
+    In the repository folder:
+
     ```bash
     docker compose up -d --build
     ```
 
-Check the log. A working start contains this line:
+Check the log (Dockge shows it on the stack's page, or run `docker compose logs -f`). After a successful start it contains:
 
-```text
-signed in as the GitHub App imgagent
+```
+signed in as the GitHub App imgagent; answering @IMGAgent
 ```
 
-The server then logs the App's events and permissions, the accounts it is installed on, and `listening on :8080`. If it logs warnings instead, see [troubleshooting](../operations/troubleshooting.md).
+followed by the App's events and permissions, the accounts it is installed on, and `listening on :8080`. Warnings at this point point to App settings that would leave commands unanswered. See [Troubleshooting](../operations/troubleshooting.md).
 
-## What compose.yaml sets
+If GitHub can't be reached at startup, the server logs an error mentioning `IMGAGENT_APP_ID` and the private key, and keeps running.
 
-| Setting | Effect |
-|---|---|
-| `build: .` and `image: imgagent:local` | the image is built locally from the `Dockerfile` |
-| `restart: unless-stopped` | the container comes back after a reboot or crash |
-| `env_file: .env` | the settings come from `.env` |
-| `secrets: imgagent_private_key` | `./imgagent.pem` is mounted at `/run/secrets/imgagent_private_key` |
-| `ports` | `127.0.0.1:${IMGAGENT_PORT:-8080}:8080`, reachable only from the host itself |
-| `read_only: true` | the root file system of the container cannot be written |
-| `tmpfs: /tmp:size=2g` | the clones of repositories (removed after each job) and git's config live here |
-| `no-new-privileges:true` | processes in the container cannot gain more privileges |
-| `logging` | `json-file`, at most 10 MB per file and 3 files |
-
-Because the port is bound to `127.0.0.1`, GitHub cannot reach it directly. See [Expose the webhook to GitHub](expose.md).
-
-## What the image does
-
-The `Dockerfile` starts from `python:3.13-slim` and installs `git`, `tini` and `ca-certificates`. It installs the packages from `requirements.txt`, copies `imgagent/`, `scripts/` and `entrypoint.sh`, and switches to the user `imgagent` (uid 10001). It sets `PORT=8080` and has a health check that requests `/healthz`. `tini` is the first process: it forwards signals and reaps the git and script subprocesses.
-
-`entrypoint.sh` runs before the server:
-
-1. If `IMGAGENT_PRIVATE_KEY_FILE` is not set and `/run/secrets/imgagent_private_key` exists, it uses that file.
-2. If a key file is set but cannot be read, it prints an error and exits.
-3. It sets `HOME` to `/tmp/home`, because the root file system is read-only, and sets two global git options there.
-4. It starts `python -m imgagent.server`.
+Next, make the server reachable for GitHub: [Expose it to GitHub](expose.md).
 
 ## Update
+
+Pull the new code and rebuild:
 
 ```bash
 git pull
 docker compose up -d --build
 ```
 
-In Dockge, run the second command in the terminal of the stack.
+Run this in Dockge's terminal for the stack or in a shell in the repository folder.
 
 !!! note
-    Dockge's *Update* button only pulls images. It does not rebuild an image that was built locally.
+    Dockge's *Update* button only pulls images. It doesn't rebuild the locally built `imgagent:local` image, so use the commands above.
 
-## Prebuilt image
+## What the container sets up
 
-The workflow `.github/workflows/docker.yml` builds the image and pushes it to `ghcr.io/<owner>/<repository>`. It runs on pushes to `main`, on tags starting with `v`, and on manual dispatch. The tags are `latest` (from the default branch), the version for `v*` tags, and the commit SHA.
+### compose.yaml
 
-`compose.yaml` does not use this image; it builds locally. To use the prebuilt image instead, you would have to replace `build: .` and `image:` in `compose.yaml` yourself.
+`compose.yaml` defines one service, `imgagent`, built from the repository's `Dockerfile` and tagged `imgagent:local`.
+
+| Setting | Effect |
+|---|---|
+| `restart: unless-stopped` | restarts the container unless you stopped it |
+| `env_file: .env` | the settings |
+| `ports: "127.0.0.1:${IMGAGENT_PORT:-8080}:8080"` | publishes the server on the loopback interface only, for a reverse proxy on the same host. The host port defaults to 8080 and can be changed with `IMGAGENT_PORT` |
+| `secrets: imgagent_private_key` (from `./imgagent.pem`) | mounts the private key at `/run/secrets/imgagent_private_key` |
+| `read_only: true` | the root file system is read-only |
+| `tmpfs: /tmp:size=2g` | a 2 GB in-memory `/tmp` for the repository clones (removed after each job) and git's config |
+| `security_opt: no-new-privileges:true` | processes can't gain privileges |
+| `logging` | `json-file` driver, at most 3 files of 10 MB each |
+
+### Dockerfile
+
+The image is based on `python:3.13-slim` and adds `git`, `tini` and `ca-certificates`. It installs the Python packages from `requirements.txt` and copies `imgagent/`, `scripts/` and `entrypoint.sh`.
+
+- The container runs as the unprivileged user `imgagent` (uid 10001).
+- `tini` is the init process. It reaps the git and script subprocesses and forwards signals.
+- `PORT=8080` is the port the server listens on inside the container. Port 8080 is exposed.
+- `GIT_TERMINAL_PROMPT=0` keeps git from waiting for credentials on a prompt.
+- A health check requests `http://127.0.0.1:$PORT/healthz` every 30 seconds, with a 5 second timeout.
+
+### entrypoint.sh
+
+Before starting the server, the entry point:
+
+1. Uses the mounted secret `/run/secrets/imgagent_private_key` as `IMGAGENT_PRIVATE_KEY_FILE` when that variable isn't set and the file exists, and exits with an error if the key file isn't readable.
+2. Sets `HOME=/tmp/home`, because the root file system is read-only, and sets git's global config there (`init.defaultBranch main`, `advice.detachedHead false`). The git identity for commits is set per commit by the jobs.
+3. Starts the webhook server with `python -m imgagent.server`.

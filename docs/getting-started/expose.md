@@ -1,81 +1,74 @@
-# Expose the webhook to GitHub
+# Expose it to GitHub
 
-GitHub delivers events to IMGAgent over HTTPS, so the container's port must be reachable from the internet through a reverse proxy or a tunnel. This page covers how the port is published, how to put a proxy in front of it, and how to test the connection.
+GitHub sends every event to `https://<your-domain>/webhook`, so the container must be reachable there over HTTPS. This page shows how to put a reverse proxy in front of it and how to test the connection.
 
-## How the port is published
+## What the container listens on
 
-The server inside the container listens on port 8080 (`PORT`, default `8080`). `compose.yaml` publishes it on the host like this:
+The server inside the container listens on port `8080` (the `PORT` variable set in the `Dockerfile`). `compose.yaml` publishes that port on the loopback interface of the host only:
 
 ```yaml
 ports:
   - "127.0.0.1:${IMGAGENT_PORT:-8080}:8080"
 ```
 
-The port is bound to `127.0.0.1` only. Nothing outside the host can reach it directly, which is intended: a reverse proxy on the same host terminates TLS and forwards requests to it. To use a different host port, set `IMGAGENT_PORT` in `.env`.
+The container is not reachable from outside the host by itself. A reverse proxy on the same host terminates HTTPS and forwards the requests to `127.0.0.1:8080`. To use a different host port, set `IMGAGENT_PORT` in `.env`.
 
 The server answers these paths:
 
 | Method and path | Answer |
 |---|---|
-| `POST /webhook` | The GitHub App webhook. Also accepted at `/`. |
-| `GET /healthz` | `200 ok`. Also answered at `/`. |
+| `POST /webhook` | the GitHub App webhook |
+| `GET /healthz`, `GET /` | `ok`, used by the container health check |
 
-Use `https://<your-domain>/webhook` as the **Webhook URL** in the [GitHub App's settings](github-app.md).
+Any other path gets `404 not found`. The Webhook URL in the App's settings must therefore end in `/webhook` (see [Register and install the GitHub App](github-app.md)).
 
-## Choose a way to reach it
+## Reverse proxy examples
 
 === "Caddy"
+    Caddy gets a certificate for the domain automatically:
 
-    With Caddy on the same host:
-
-    ```text
+    ```
     imgagent.example.org {
         reverse_proxy 127.0.0.1:8080
     }
     ```
 
-    Caddy obtains the certificate automatically.
-
 === "Nginx Proxy Manager / Traefik"
-
-    Create a proxy host for your domain that forwards to `127.0.0.1:8080`, with a Let's Encrypt certificate. If the proxy runs in a container on a shared Docker network, it can forward to the container as `imgagent:8080` instead.
+    Create a proxy host for your domain that forwards to `127.0.0.1:8080` (or to the container `imgagent:8080` on a shared Docker network), with a Let's Encrypt certificate.
 
 === "Cloudflare Tunnel"
-
-    Point a Cloudflare Tunnel at `http://127.0.0.1:8080`. This needs no open ports on the server.
+    No open ports on the host: point a Cloudflare Tunnel at `http://127.0.0.1:8080`.
 
 ### When the proxy runs in another container
 
-A container cannot reach `127.0.0.1` of the host. Do one of the following:
+From inside another container, `127.0.0.1` refers to that container and not to the host, so the published port cannot be reached. Do one of the following:
 
-- Change the port line in `compose.yaml` to `"8080:8080"`, so the port is published on all interfaces. Make sure your firewall only allows what you intend.
+- Change the port line in `compose.yaml` to `"8080:8080"`, so the port is published on all interfaces of the host.
 - Put the proxy and the `imgagent` container on one Docker network, and forward to `imgagent:8080`.
 
-## Unsigned requests are rejected
+!!! warning
+    With `"8080:8080"` the plain-HTTP port is open to the network. Keep the reverse proxy in front of it, because GitHub must reach the webhook over HTTPS.
 
-Every delivery to `/webhook` is checked against the `X-Hub-Signature-256` header, using the webhook secret from `IMGAGENT_WEBHOOK_SECRET`. A request with a missing or wrong signature gets `401 bad signature`, and the server logs a warning with the sender's address. If every delivery from GitHub gets a 401, the secret in the App's settings and in `.env` differ.
+## Signatures
 
-!!! note
-    Behind a proxy, the logged address is the proxy's address, not the sender's.
+The server checks the `X-Hub-Signature-256` header of every delivery against `IMGAGENT_WEBHOOK_SECRET`. A delivery that is unsigned or signed with another secret gets `401 bad signature`, and the server logs a warning with the client address. The proxy only forwards requests and does not need to know the secret.
 
 ## Test the connection
 
-1. Check that the server is up. On the host:
+1. On the App's page, open *Advanced → Recent Deliveries*. It lists the `ping` that GitHub sent when the App was created.
+2. *Redeliver* the ping. The response should be `200` with the body `pong`.
+3. Write `@IMGAgent help` in an issue of a repository where the App is installed. IMGAgent should reply with the list of commands.
 
-    ```bash
-    curl http://127.0.0.1:8080/healthz
-    ```
+If the redelivery fails, these responses tell you what went wrong:
 
-    The answer is `ok`. Through the proxy, `curl https://<your-domain>/healthz` should give the same answer.
+| Response | Meaning |
+|---|---|
+| no response, or a proxy error | GitHub can't reach the server: check the domain, the certificate and the proxy target |
+| `404 not found` | the Webhook URL doesn't end in `/webhook` |
+| `401 bad signature` | the webhook secret in the App's settings and `IMGAGENT_WEBHOOK_SECRET` in `.env` differ |
+| `200 already handled` | the server has already seen this delivery id since it was started; deliveries are processed once |
 
-2. Open the App's page on GitHub, then *Advanced → Recent Deliveries*. GitHub sent a `ping` when you created the App. Click **Redeliver** and expect the response `200 pong`.
+!!! note
+    The help reply only goes to people with write, maintain or admin permission on the repository, and only for installations on accounts listed in `IMGAGENT_ALLOWED_OWNERS`. If the ping works but `@IMGAgent help` gets no answer, the response text of that delivery in *Recent Deliveries* says why. See [Troubleshooting](../operations/troubleshooting.md).
 
-3. In an issue of a repository where the App is installed, write a comment that starts with:
-
-    ```text
-    @IMGAgent help
-    ```
-
-    IMGAgent answers with the list of commands. Only people with write access to the repository get an answer.
-
-If something fails, the response text in *Recent Deliveries* tells why an event started nothing, for example that the owner is not in `IMGAGENT_ALLOWED_OWNERS` or that no command was found.
+Next: [Per-repository setup](per-repository.md).

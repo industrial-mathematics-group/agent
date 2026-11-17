@@ -1,56 +1,60 @@
-# Per-repository file .github/imgagent.toml
+# Repository settings file
 
-An optional file in a repository that tells IMGAgent more about the project when it answers questions from the docs or writes them. Without it, IMGAgent uses the repository's name and description.
+A repository can hold an optional `.github/imgagent.toml` that tells Claude more about the project than the GitHub repository description does. IMGAgent reads its `[docs]` table and passes the values to the `ask`, `update` and `make docs` scripts.
 
-## Where it is read
+## Where it goes
 
-IMGAgent reads `.github/imgagent.toml` from its clone of the repository. For `ask` the clone is sparse and contains only the folders it reads and this file. For `update` and `make docs` it is a clone of the default branch. Only the `[docs]` table is used; other tables are ignored.
+The file is `.github/imgagent.toml` in the repository, read from the default branch. Every job clones the repository, and IMGAgent reads the file from that clone. `ask` uses a sparse clone that contains only the named folders and `.github/imgagent.toml`.
 
-If the file is missing, IMGAgent uses the defaults below. If it is not valid TOML, IMGAgent logs a warning (`ignoring .github/imgagent.toml`) and uses the defaults.
+If the file is missing, IMGAgent uses the defaults below. If the file is not valid TOML, IMGAgent logs a warning (`ignoring .github/imgagent.toml: ...`) and also uses the defaults.
 
-## The `[docs]` table
+The signoff assistant and the signoff issue form do not read this file.
+
+## Example
 
 ```toml
 [docs]
-project = "agent-sandbox"
 about = "an open source project for running coding agents in sandboxed containers"
 audience = "people who deploy and run agent-sandbox on their own Linux machines"
-url = "https://industrial-mathematics-group.github.io/agent-sandbox/"
+url = "https://industrial-mathematics-group.github.io/agent-sandbox/"   # "none": answers cite paths instead
 ```
 
-| Key | Meaning | Default when missing or empty |
+## Keys
+
+All keys are optional and belong to the `[docs]` table.
+
+| Key | Passed to the scripts as | Default when the key is missing or empty |
 |---|---|---|
-| `project` | The project's name, used in the prompts. | The repository name, without the owner. |
-| `about` | One sentence on what the project is. | The repository's description on GitHub; empty if it has none. |
-| `audience` | Who reads the docs. | The docs scripts use "people who use `<project>`". |
-| `url` | The address of the published site. | `https://<owner>.github.io/<repo>/`, with the owner in lowercase. |
+| `project` | `DOCS_PROJECT` | the repository name (without the owner) |
+| `about` | `DOCS_ABOUT` | the repository description on GitHub, or nothing |
+| `audience` | `DOCS_AUDIENCE` | empty; `make docs` then uses "people who use <project>" |
+| `url` | `DOCS_URL` | `https://<owner>.github.io/<repository>/`, with the owner in lower case |
 
-### `url`
+`project`
+:   The project's name, as Claude uses it in prompts and as `site_name` when `make docs` creates a new `zensical.toml`.
 
-`url` decides how answers to `ask docs` refer to pages:
+`about`
+:   One sentence on what the project is. Claude sees it as "<project>, <about>". `make docs` also uses it as `site_description` in a new `zensical.toml` (otherwise the project name).
 
-- With a URL, the answer names the pages it used as links of the form `<url>/<path>/`, where `<path>` is the page path without `.md` (and without `/index` for index pages).
-- With `url = "none"` or `url = ""`, no site address is passed on, and the answer names pages by their path under `docs/`.
+`audience`
+:   Who reads the documentation. Only `make docs` uses it, to decide how the pages are written.
 
-Use `"none"` when the docs are not published, or not at the default GitHub Pages address and you do not want guessed links.
+`url`
+:   The published documentation site. Set it to `"none"` (or `""`) when there is no site: `DOCS_URL` is then empty. If you leave the key out, IMGAgent assumes the GitHub Pages address of the repository.
 
-For `make docs`, the `url` is also written as `site_url` into a new `zensical.toml`. An existing `zensical.toml` keeps everything except its `nav`.
+Besides these, IMGAgent always sets `DOCS_REPO` to the repository's `owner/name`; it is not configurable in the file.
 
-## How the values reach the scripts
+## What each command uses
 
-IMGAgent does not pass the file itself to the scripts. It turns the values into environment variables when it starts them:
+| Command | `project` | `about` | `audience` | `url` |
+|---|---|---|---|---|
+| `ask` | yes | yes | no | yes |
+| `update` | yes | yes | no | no |
+| `make docs` | yes | yes | yes | yes |
 
-| Environment variable | Comes from |
-|---|---|
-| `DOCS_PROJECT` | `project`, else the repository name |
-| `DOCS_ABOUT` | `about`, else the repository description |
-| `DOCS_AUDIENCE` | `audience`, else empty |
-| `DOCS_URL` | `url`; empty when it is `"none"` or `""` |
-| `DOCS_REPO` | `owner/name` of the repository (not configurable) |
+With `ask`, the URL matters only when the question is about `docs` alone (`@IMGAgent ask docs`): Claude then names the pages it used as links of the form `<url>/<path>/`, where `<path>` is the page's path under `docs/` without `.md` (and without `/index` for index pages). With an empty URL, or with any other folders, answers cite file paths in the repository instead.
 
-`ask` runs `scripts/repo/ask.py`, `update` runs `scripts/repo/update.py` and `make docs` runs `scripts/docs/write_docs.py`. All read these variables.
+With `make docs`, the URL and `DOCS_REPO` are used only when the repository has no `zensical.toml` yet: the new file gets `site_url` from the URL (left out when it is empty), and `repo_url` and `repo_name` from the repository. An existing `zensical.toml` keeps everything except its `nav`. See [make docs](../usage/make-docs.md).
 
 !!! note
-    The scripts see only the variables IMGAgent gives them, plus `PATH`, `HOME`, `LANG` and `SSL_CERT_FILE`. Setting `DOCS_PROJECT` or the others in the server's `.env` has no effect; use `.github/imgagent.toml` instead.
-
-The file is not used by `signoff` or the signoff form.
+    `about` falls back to the repository description, so setting a good description on GitHub already helps. Use the file when you want a different sentence for Claude, or an audience or URL.

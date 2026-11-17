@@ -1,60 +1,108 @@
-# Development and updating the scripts
+# Development
 
-This page covers running the test suite and refreshing the signoff scripts when the organisation's bots change. The tests need no network access and no GitHub App.
+This page explains how to set up a local environment, run the tests, and keep the copied bot scripts in step with the organisation's workflows. It also describes how the code is split between the server in `imgagent/` and the Claude scripts in `scripts/`.
 
-## Run the tests
+## Layout
 
-Create a virtual environment, install the dependencies plus `pytest`, and run the suite from the repository root:
+IMGAgent has two parts. The server receives webhook events and talks to GitHub. The scripts do the Claude work.
+
+| Path | What it does |
+|---|---|
+| `imgagent/server.py` | The webhook server. It checks GitHub's signature, answers within GitHub's 10 seconds, and runs the job in the background. It serves `POST /webhook` and `GET /healthz`. |
+| `imgagent/commands.py` | Turns a webhook event into at most one job. It has only pure functions and makes no network calls, so it is easy to test. |
+| `imgagent/jobs.py` | Runs each command. It fetches tokens, makes a temporary clone of the repository, starts the matching script as a subprocess with the environment that script expects, and comments or opens the pull request. |
+| `imgagent/github.py` | GitHub App authentication (JWTs, installation tokens) and a small REST client. It uses the standard library and PyJWT. |
+| `scripts/repo/ask.py` | Answers a question for `ask`. |
+| `scripts/repo/update.py` | Edits existing files for `update`. |
+| `scripts/repo/common.py` | Code shared by `ask.py` and `update.py`: which files of a target are read, and the calls to Claude. |
+| `scripts/docs/write_docs.py` | Builds `docs/` and the nav in `zensical.toml` for `make docs`. |
+| `scripts/signoff/assistant.py` | The signoff assistant for `@IMGAgent signoff`. |
+| `scripts/signoff/request.py` | Turns the signoff form answers into a `SIGNOFF.toml` pull request. |
+
+The scripts are the same code the GitHub Actions versions of these bots ran:
+
+- `scripts/docs/` comes from agent-sandbox's docs bot.
+- `scripts/repo/` holds `ask` and `update`.
+- `scripts/signoff/` is extracted from the Signoff-Assistant and Signoff-Request workflows of `industrial-mathematics-group/.github`.
+
+`imgagent/jobs.py` starts each script with only the environment variables it needs, plus `PATH`, `HOME`, `LANG` and `SSL_CERT_FILE` when they are set. It logs the script's output line by line. For the signoff scripts it recreates what a GitHub Actions run would provide: `GITHUB_EVENT_PATH`, `GITHUB_REPOSITORY`, `GITHUB_TOKEN`, `GITHUB_API_URL`, `GITHUB_SERVER_URL` and a `GITHUB_OUTPUT` file.
+
+```mermaid
+graph LR
+  A[GitHub webhook] --> B[imgagent/server.py]
+  B --> C[imgagent/commands.py<br/>route to a job]
+  C --> D[imgagent/jobs.py<br/>token, clone]
+  D --> E[scripts/...<br/>Claude work]
+  E --> D
+  D --> F[comment or pull request]
+```
+
+## Set up a local environment
 
 ```bash
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt pytest
-python -m pytest tests
 ```
 
-## Pinned dependencies
+`requirements.txt` pins these packages:
 
-`requirements.txt` pins exact versions:
-
-| Package | Version | Used for |
-|---|---|---|
-| `anthropic` | `==2.8.0` | Claude calls in `scripts/docs/`, `scripts/repo/` and `scripts/signoff/` |
-| `aisignoff` | `==1.0.0rc8` | the `aisignoff` command that the signoff scripts run to edit and lint `SIGNOFF.toml` |
-| `PyJWT[crypto]` | `==2.15.1` | signing the GitHub App's JWT in `imgagent/github.py` |
-
-The Docker image installs the same file, so a changed pin takes effect after `docker compose up -d --build`.
-
-## What the tests cover
-
-The tests live in `tests/`.
-
-| File | What it checks |
+| Package | Version |
 |---|---|
-| `tests/test_imgagent.py` | Routing of events to commands (`imgagent/commands.py`): which comments and issues start a job, how targets are checked (`..`, absolute paths, `.git`, glob characters, `make` other than `docs`), and which are ignored (bots, code, part of a word, pull requests, closed issues, form issues). Job keys. The webhook signature check. Parsing of `GITHUB_OUTPUT` files. The pull request body that the docs writer fills in. The HTTP server end to end: `ping`, bad signature (`401`), queued jobs, repeated delivery ids, owners outside the allowlist, and `/healthz`. The messages that explain why an event started nothing. That the bot user lookup never sends the App's JWT to `/users/...`. |
-| `tests/test_imgagent.py` (`make` and `update` jobs) | `do_make` and `do_update` against a local git repository instead of GitHub: the branch, the commit by `<slug>[bot]`, the pull request request that is sent, and that `update` commits only modified files under its target or at the top level (no new, deleted or workflow files). Targets that don't exist or lead outside the clone. |
-| `tests/test_repo_scripts.py` | Which files `scripts/repo/` reads for a target (tracked text files only, plus top-level files for `update`), the size limit, and that `update.py` only edits files it may, with a fake Claude. |
-| `tests/test_write_docs.py` | How `scripts/docs/write_docs.py` handles `zensical.toml`: creating the file, replacing a `nav` (one line, with comments, with brackets in strings), adding `nav` to `[project]`, adding a `[project]` table, leaving other tables alone, and keeping the written pages when the nav update fails. No Claude calls are made. |
+| `anthropic` | `2.8.0` |
+| `aisignoff` | `1.0.0rc8` |
+| `PyJWT[crypto]` | `2.15.1` |
 
-The signoff scripts (`scripts/signoff/`) and the Claude calls themselves are not covered by these tests.
+The container image uses Python 3.13 (`python:3.13-slim`) and installs `git` for the clones.
 
-## Refresh the signoff scripts
-
-`scripts/signoff/assistant.py` and `scripts/signoff/request.py` are the Python steps of two workflows in the `industrial-mathematics-group/.github` repository, copied out unchanged. IMGAgent runs them in a clone of the repository with the environment GitHub Actions would provide (see `_actions_env` in `imgagent/jobs.py`).
-
-When those workflows change:
-
-1. Copy the Python step of `.github/workflows/signoff-assistant.yml` into `scripts/signoff/assistant.py`.
-2. Copy the Python step of `.github/workflows/signoff-request.yml` into `scripts/signoff/request.py`.
-3. Keep the header comment at the top of each file.
-4. In `requirements.txt`, change the `aisignoff` pin to the version the organisation uses.
-5. Run the tests, then rebuild and restart the container:
+## Run the tests
 
 ```bash
 python -m pytest tests
-docker compose up -d --build
 ```
 
-!!! note
-    Do not edit the logic in these two files by hand. Changes belong in the organisation's workflows, so that the GitHub Actions version and IMGAgent stay the same code.
+The tests in `tests/` cover:
 
-The scripts in `scripts/docs/` (`write_docs.py`) and `scripts/repo/` (`ask.py`, `update.py` and their shared `common.py`) are not copied from elsewhere; they are changed in this repository.
+- routing events to commands, and checking command targets
+- the webhook signature check
+- the HTTP server
+- which files `ask` and `update` read and which they may change
+- the branch, commit and pull request of `make` and `update`
+
+The tests use a local git repository in place of GitHub.
+
+!!! note
+    `.dockerignore` leaves out `tests/`, `.venv/`, `.env` and `*.pem`, so none of these end up in the container image.
+
+## Run a script on its own
+
+Each Claude script can also run directly from the root of a repository. The scripts that write files change the working tree, so review the result with `git diff`. For example:
+
+```bash
+pip install anthropic
+export ANTHROPIC_API_KEY=sk-ant-...
+TARGETS=docs,src python path/to/imgagent/scripts/repo/ask.py "How do I add a host to the allowlist?"
+TARGETS=docs CONTEXT=src python path/to/imgagent/scripts/repo/update.py "fix what is outdated"
+python path/to/imgagent/scripts/docs/write_docs.py make "optional hint for Claude"
+```
+
+Without `SUMMARY_FILE` (for `update.py` and `write_docs.py`) or `ANSWER_FILE` (for `ask.py`), the script prints its result instead of writing it to a file. The [ask](../usage/ask.md), [update](../usage/update.md) and [make docs](../usage/make-docs.md) pages list each script's environment variables.
+
+## Keep the signoff scripts in sync
+
+`scripts/signoff/assistant.py` and `scripts/signoff/request.py` are copied unchanged from the Python steps of two workflows in `industrial-mathematics-group/.github`. When those bots change there, update the copies:
+
+1. Copy the Python step of `.github/workflows/signoff-assistant.yml` into `scripts/signoff/assistant.py`.
+2. Copy the Python step of `.github/workflows/signoff-request.yml` into `scripts/signoff/request.py`.
+3. Keep the header comment at the top of each file. It records where the code comes from and how IMGAgent runs it.
+4. In `requirements.txt`, bump `aisignoff` to the organisation's version.
+
+Both signoff scripts read the variable `SIGNOFF_DRY_RUN=1`. With it set, they print the GitHub API calls instead of making them, which is useful for testing outside Actions.
+
+## Update a running server
+
+After changes are merged, update the server as described in [Run the container](../getting-started/deploy.md):
+
+```bash
+git pull
+docker compose up -d --build
+```
