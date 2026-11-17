@@ -1,0 +1,93 @@
+"""scripts/repo: which files ask and update read, and that update only edits what it may (no Claude calls)."""
+
+import importlib
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    files = {"src/a.py": "PY = '3.12'\n", "src/sub/b.py": "x = 1\n", "srcx/c.py": "y\n", "docs/i.md": "# Hi\n",
+             "pyproject.toml": "requires-python = '>=3.12'\n", "logo.png": "PNG\0", "LICENSE": "MIT\n",
+             ".github/workflows/ci.yml": "python: 3.12\n"}
+    for rel, text in files.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(text)
+    (tmp_path / "untracked.txt").write_text("no\n")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "--", *files], check=True)
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    monkeypatch.syspath_prepend(str(ROOT / "scripts" / "repo"))
+    for m in ("common", "update", "ask"):
+        sys.modules.pop(m, None)
+    return tmp_path
+
+
+def test_select(repo):
+    common = importlib.import_module("common")
+    assert list(common.select(repo, "src")) == ["src/a.py", "src/sub/b.py"]
+    assert list(common.select(repo, "src", top_level=True)) == ["pyproject.toml", "src/a.py", "src/sub/b.py"]
+    assert list(common.select(repo, ".github")) == [".github/workflows/ci.yml"]
+
+
+def test_select_refuses_too_much(repo, monkeypatch):
+    common = importlib.import_module("common")
+    monkeypatch.setattr(common, "MAX_CONTEXT_CHARS", 10)
+    with pytest.raises(common.TooLarge, match="Name a smaller folder"):
+        common.select(repo, "src")
+
+
+def test_apply_edits(repo):
+    common = importlib.import_module("common")
+    text, failed = common.apply_edits("a b a c", [{"find": "b", "replace": "B"}, {"find": "a", "replace": "x"},
+                                                  {"find": "", "replace": "y"}])
+    assert text == "a B a c" and len(failed) == 2
+
+
+class FakeClaude:
+    def __init__(self, plan, edits):
+        self.plan, self.edits = plan, edits
+
+    def call_json(self, prompt, schema, max_tokens=16000):
+        if "properties" in schema and "changes" in schema["properties"]:
+            return self.plan
+        path = prompt.split("Change the file ", 1)[1].split(" ", 1)[0]
+        return {"edits": self.edits.get(path, [])}
+
+
+def test_update_only_edits_files_it_may(repo, monkeypatch):
+    monkeypatch.setenv("TARGET", "src")
+    update = importlib.import_module("update")
+    files = update.select(repo, "src", top_level=True)
+    files[".github/workflows/ci.yml"] = "python: 3.12\n"   # as if the target were .github
+    plan = {"changes": [{"path": "src/a.py", "reason": "bump"}, {"path": "pyproject.toml", "reason": "bump"},
+                        {"path": "src/new.py", "reason": "create it"},
+                        {"path": ".github/workflows/ci.yml", "reason": "bump"}],
+            "note": "CI needs a change too."}
+    edits = {"src/a.py": [{"find": "3.12", "replace": "3.13"}],
+             "pyproject.toml": [{"find": ">=3.12", "replace": ">=3.13"}, {"find": "missing", "replace": "x"}]}
+    summary = "\n".join(update.update(FakeClaude(plan, edits), files, "require 3.13"))
+    assert (repo / "src/a.py").read_text() == "PY = '3.13'\n"
+    assert (repo / "pyproject.toml").read_text() == "requires-python = '>=3.13'\n"
+    assert not (repo / "src/new.py").exists()
+    assert (repo / ".github/workflows/ci.yml").read_text() == "python: 3.12\n"
+    assert "**skipped** `src/new.py`: it is not one of the files I may change" in summary
+    assert "**skipped** `.github/workflows/ci.yml`: it may not be changed" in summary
+    assert "1 edit(s) could not be applied" in summary and summary.endswith("CI needs a change too.")
+
+
+def test_ask_cites_docs_pages_only_for_docs(repo, monkeypatch):
+    monkeypatch.setenv("DOCS_URL", "https://o.github.io/r/")
+    monkeypatch.setenv("TARGET", "docs")
+    ask = importlib.import_module("ask")
+    assert "https://o.github.io/r/<path>/" in ask.instructions()
+    sys.modules.pop("ask")
+    monkeypatch.setenv("TARGET", "src")
+    ask = importlib.import_module("ask")
+    assert "by their path in the repository" in ask.instructions() and "`src`" in ask.instructions()
+    assert ask.MODEL == "claude-haiku-5-5"

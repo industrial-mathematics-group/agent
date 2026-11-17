@@ -6,23 +6,34 @@ or a comment, GitHub sends the event to this server, and IMGAgent answers as `im
 | Command | Where | What happens |
 |---|---|---|
 | `@IMGAgent signoff` and your words | new issue or issue comment | Claude turns them into the answers of the signoff form; IMGAgent opens a `SIGNOFF.toml` pull request, or asks what is missing |
-| `@IMGAgent docs ask <question>` | start of a comment, or a new issue | Claude answers from the pages in `docs/` |
-| `@IMGAgent docs make [hint]` | start of a comment | Claude rebuilds `docs/` from the code; IMGAgent opens a pull request |
-| `@IMGAgent docs update [hint]` | start of a comment | Claude fixes only what is outdated in `docs/`; IMGAgent opens a pull request |
+| `@IMGAgent ask <folder> <question>` | start of a comment, or a new issue | Claude answers from the files in that folder, e.g. `ask docs` or `ask src` |
+| `@IMGAgent update <folder> <task>` | start of a comment | Claude carries out a small task by editing existing files in that folder and at the top level; IMGAgent opens a pull request |
+| `@IMGAgent make docs [hint]` | start of a comment | Claude rebuilds `docs/` from the code; IMGAgent opens a pull request |
 | `@IMGAgent help` | start of a comment | the list of commands |
 | the issue form *Signoff: declare or attest files* | new or edited issue | IMGAgent opens the `SIGNOFF.toml` pull request, without AI (`IMGAGENT_SIGNOFF_FORM`) |
+
+Commands are *action, then target*. The target is a folder (or file) of the repository, written as a relative
+path such as `docs`, `src` or `src/package`; it must exist, and `..`, absolute paths, `.git` and glob characters
+are refused. The text after the target, which may span several lines, is the question, task or hint.
+
+- `ask` reads only the target: every tracked text file in it (up to about 150k tokens; name a subfolder for more).
+- `update` reads the target plus the files at the top level of the repository (`pyproject.toml`, `README.md`, ...),
+  and may only *modify* those files: it never creates, deletes or renames one, and never touches
+  `.github/workflows/`. It is meant for small tasks over several files, such as `update src require Python 3.13`
+  or `update docs fix the links to the old install page`.
+- `make` creates files, which depends much more on the task, so it only knows `docs` for now.
 
 Only people with write access to the repository are answered, never bots. Nothing is pushed to a default branch:
 every change is a pull request that a person reviews, ticks and merges. Repositories need no workflow files.
 
 ```
-comment "@IMGAgent docs make" ──► GitHub App webhook (HTTPS, signed) ──► reverse proxy ──► imgagent container
+comment "@IMGAgent make docs" ──► GitHub App webhook (HTTPS, signed) ──► reverse proxy ──► imgagent container
                                                                                          │ verifies the signature
    pull request + comment  ◄── installation token (1 h, this installation only) ◄─────────┘ clones, runs Claude
 ```
 
 The Claude work is done by the scripts in `scripts/`, the same code the GitHub Actions versions of these bots
-ran (`scripts/docs/` from agent-sandbox's docs bot, `scripts/signoff/` extracted from the Signoff-Assistant and
+ran (`scripts/docs/` from agent-sandbox's docs bot, `scripts/repo/` for `ask` and `update`, `scripts/signoff/` extracted from the Signoff-Assistant and
 Signoff-Request workflows of `industrial-mathematics-group/.github`). The server (`imgagent/`) only receives
 events, gets tokens, clones and talks to GitHub.
 
@@ -118,8 +129,8 @@ Nothing to add. To move a repository over from the GitHub Actions bots, delete t
 (`docs-bot.yml`, `docs-writer.yml`, `.github/docs-bot/`, the Signoff-Assistant caller, and the Signoff-Request
 caller while `IMGAGENT_SIGNOFF_FORM=true`), so two bots don't answer the same thing.
 
-- `docs make` / `docs update` write a Zensical site: `docs/` and `zensical.toml`. Without them, `docs make` creates both (a complete `zensical.toml` with theme, Markdown extensions and nav); an existing `zensical.toml` keeps everything but its `nav`.
-  `docs ask` only needs `docs/`.
+- `make docs` writes a Zensical site: `docs/` and `zensical.toml`. Without them, it creates both (a complete `zensical.toml` with theme, Markdown extensions and nav); an existing `zensical.toml` keeps everything but its `nav`.
+  `ask` and `update` only need the folder you name.
 - `signoff` and the form need a `SIGNOFF.toml` (`aisignoff init`). The pull requests follow the organisation's
   PR template, so *PR-signoff* checks them; as an App's pull requests, they start the repository's checks.
 - Optional `.github/imgagent.toml` on the default branch, to tell Claude more than the repository description:
@@ -135,9 +146,10 @@ url = "https://industrial-mathematics-group.github.io/agent-sandbox/"   # "none"
 
 All in `.env` (see `.env.example`): the App (`IMGAGENT_APP_ID`, `IMGAGENT_WEBHOOK_SECRET`, the private key as the
 file `imgagent.pem` or `IMGAGENT_PRIVATE_KEY`), `IMGAGENT_ALLOWED_OWNERS`, `ANTHROPIC_API_KEY`, and optionally
-`IMGAGENT_HANDLE`, `IMGAGENT_SIGNOFF_FORM`, `IMGAGENT_WORKERS` and the models (`DOCS_ASK_MODEL` default
-`claude-haiku-5-5`, `DOCS_WRITER_MODEL` default `claude-opus-5-5`, `SIGNOFF_MODEL` default `claude-sonnet-5-5`
-with `SIGNOFF_MODEL_NAME`, keep both in step).
+`IMGAGENT_HANDLE`, `IMGAGENT_SIGNOFF_FORM`, `IMGAGENT_WORKERS` and the models (`ASK_MODEL` default
+`claude-haiku-5-5` for `ask`, `WRITER_MODEL` default `claude-opus-5-5` and `WRITER_EFFORT` for `update` and `make`,
+`SIGNOFF_MODEL` default `claude-sonnet-5-5` with `SIGNOFF_MODEL_NAME`, keep both in step). The old names
+`DOCS_ASK_MODEL`, `DOCS_WRITER_MODEL` and `DOCS_WRITER_EFFORT` still work.
 
 ## Safety
 
@@ -145,6 +157,9 @@ with `SIGNOFF_MODEL_NAME`, keep both in step).
 - Only people with write, maintain or admin permission are answered, never bots.
 - Comment text reaches the scripts as environment variables, never a shell. The repository's code is read, not
   run. The models have no tools: they return text or a fixed JSON schema, which the scripts check.
+- Targets are checked twice: by name when the command is read, and in the clone (it must exist and stay inside
+  the repository, also through symlinks). `update` commits only modified tracked files under its target or at the
+  top level; anything else the script left in the clone stays out of the pull request.
 - Each job works in a temporary clone that is deleted afterwards. The container runs as an unprivileged user on a
   read-only root file system; tokens are installation tokens that expire after an hour.
 - The Claude key and the private key live only in `.env` and `imgagent.pem` on the VPS; neither is in git.
@@ -157,8 +172,9 @@ pip install -r requirements.txt pytest
 python -m pytest tests
 ```
 
-`tests/` covers the routing of events to commands, the signature check, the HTTP server and the docs writer's
-branch, commit and pull request, with a local git repository instead of GitHub.
+`tests/` covers the routing of events to commands and the target checks, the signature check, the HTTP server,
+which files `ask` and `update` read and may change, and the branch, commit and pull request of `make` and
+`update`, with a local git repository instead of GitHub.
 
 When the bots change in `industrial-mathematics-group/.github`, copy the Python step of
 `.github/workflows/signoff-assistant.yml` and `signoff-request.yml` into `scripts/signoff/assistant.py` and

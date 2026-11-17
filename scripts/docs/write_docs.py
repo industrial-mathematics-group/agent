@@ -1,21 +1,16 @@
-"""Write or refresh the documentation in docs/ from the code, with Claude.
+"""Write the documentation in docs/ from the code, with Claude.
 
-Two commands, run by IMGAgent (imgagent/jobs.py) from an issue or PR comment
-(`@IMGAgent docs make` / `@IMGAgent docs update`), which then opens a pull request:
-
-  make    Build the docs from the code alone. Claude plans the site (pages, sections,
-          nav), then writes each page. Every Markdown page under docs/ is replaced, so
-          hand-written pages are gone unless you keep them in the review.
-  update  Compare the existing docs with the code and fix only what is outdated or
-          missing. Changes to existing pages are small find-and-replace edits, so text
-          that is still right stays byte for byte as it was; new pages are written in
-          full; pages for removed code can be deleted. Nav in zensical.toml follows.
+Run by IMGAgent (imgagent/jobs.py) for `@IMGAgent make docs [hint]` in an issue or PR comment,
+which then opens a pull request. Claude plans the site (pages, sections, nav) from the code,
+then writes each page. Every Markdown page under docs/ is replaced, so hand-written pages are
+gone unless you keep them in the review. Small changes to existing pages are
+`@IMGAgent update docs <task>` instead (scripts/repo/update.py).
 
 Run it locally, from the root of the repository to document (it edits the working tree;
 review with `git diff`). Without docs/ or zensical.toml, both are created:
     pip install anthropic
     export ANTHROPIC_API_KEY=sk-ant-...
-    python path/to/imgagent/docs/write_docs.py update ["optional hint for Claude"]
+    python path/to/imgagent/scripts/docs/write_docs.py make ["optional hint for Claude"]
 
 Environment:
     REPO_ROOT           the repository to document, default the current directory
@@ -23,12 +18,11 @@ Environment:
     DOCS_ABOUT          one sentence on what the project is, default none
     DOCS_AUDIENCE       who reads the docs, default "people who use <project>"
     DOCS_URL, DOCS_REPO site_url and owner/name for a new zensical.toml
-    DOCS_WRITER_MODEL   model id, default claude-opus-5-5
-    DOCS_WRITER_EFFORT  low | medium | high | xhigh | max, default medium
+    WRITER_MODEL        model id, default claude-opus-5-5
+    WRITER_EFFORT       low | medium | high | xhigh | max, default medium
     SUMMARY_FILE        where to write a Markdown summary of the changes (PR body)
 
-Cost: the code (~75k tokens) and, for update, the docs (~25k tokens) are sent once and
-then read from the prompt cache by every following call in the same run.
+Cost: the code (~75k tokens) is sent once and then read from the prompt cache by every following call in the same run.
 """
 
 from __future__ import annotations
@@ -53,8 +47,8 @@ ABOUT = os.environ.get("DOCS_ABOUT", "").strip().rstrip(".")
 AUDIENCE = os.environ.get("DOCS_AUDIENCE", "").strip() or f"people who use {PROJECT}"
 NAMED = f"{PROJECT}, {ABOUT}" if ABOUT else PROJECT
 
-MODEL = os.environ.get("DOCS_WRITER_MODEL") or "claude-opus-5-5"
-EFFORT = os.environ.get("DOCS_WRITER_EFFORT") or "medium"
+MODEL = os.environ.get("WRITER_MODEL") or os.environ.get("DOCS_WRITER_MODEL") or "claude-opus-5-5"
+EFFORT = os.environ.get("WRITER_EFFORT") or os.environ.get("DOCS_WRITER_EFFORT") or "medium"
 WORKERS = 4  # page calls in parallel, after the first call has filled the cache
 
 # Files that are not code worth documenting: vendored wheels, the docs themselves, legal text.
@@ -102,26 +96,6 @@ def load_code() -> str:
             continue
         files.append(f'<file path="{rel}">\n{data.decode("utf-8", "replace")}\n</file>')
     return "\n\n".join(files)
-
-
-def load_docs() -> str:
-    pages = []
-    for path in sorted(DOCS_DIR.rglob("*.md")):
-        rel = path.relative_to(DOCS_DIR).as_posix()
-        pages.append(f'<page path="{rel}">\n{path.read_text(encoding="utf-8")}\n</page>')
-    return "\n\n".join(pages)
-
-
-def changed_since_docs() -> str:
-    """Code files changed since the last commit that touched docs/ (a hint for update)."""
-    try:
-        last = _git("log", "-1", "--format=%H", "--", "docs").strip()
-        if not last:
-            return ""
-        return _git("diff", "--stat=120", f"{last}..HEAD", "--", ".", ":(exclude)docs",
-                    ":(exclude)*.whl").strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return ""
 
 
 # --- Calling Claude -----------------------------------------------------------------------
@@ -363,15 +337,6 @@ def save_nav(nav: list, summary: list[str]) -> None:
                        f"```toml\n{format_nav(nav)}\n```")
 
 
-def nav_paths(nav: list) -> list[str]:
-    out = []
-    for entry in nav:
-        values = [entry] if isinstance(entry, str) else list(entry.values())
-        for v in values:
-            out += [v] if isinstance(v, str) else v
-    return out
-
-
 # --- make ---------------------------------------------------------------------------------
 
 PLAN_SCHEMA = {
@@ -473,213 +438,25 @@ def make(writer: DocsWriter, hint: str) -> list[str]:
     return summary
 
 
-# --- update -------------------------------------------------------------------------------
-
-REVIEW_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "changes": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "action": {"type": "string", "enum": ["edit", "create", "delete"]},
-                    "section": {"type": "string"},
-                    "title": {"type": "string"},
-                    "reason": {"type": "string"},
-                },
-                "required": ["path", "action", "section", "title", "reason"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    "required": ["changes"],
-    "additionalProperties": False,
-}
-
-REVIEW_PROMPT = """\
-The current documentation is in the <page> elements above, and its nav is:
-
-{nav}
-
-Compare it with the code and list what is outdated, wrong, or missing: options, defaults,
-commands, file paths, behaviour, add-ons or features the docs describe differently from the
-code or do not mention. Only list real mismatches with the code; do not list wording or
-style improvements, and leave pages that are correct alone. An empty list is a fine answer.
-
-For each change give:
-- path: the page relative to docs/.
-- action: "edit" for an existing page, "create" for a new page (only when no existing page
-  is the right home), "delete" only for a page about something the code no longer has.
-- section: for "create", the nav section title to add it to (an existing one if it fits,
-  "" for top level); otherwise "".
-- title: for "create", the page title; otherwise "".
-- reason: exactly what is wrong and what the code says instead, with file names, specific
-  enough that the fix can be made from this note alone.
-{changed}"""
-
-EDIT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "edits": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {"find": {"type": "string"}, "replace": {"type": "string"}},
-                "required": ["find", "replace"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    "required": ["edits"],
-    "additionalProperties": False,
-}
-
-EDIT_PROMPT = """\
-Fix the page {path} (its current text is in the <page path="{path}"> element above).
-
-What is wrong: {reason}
-
-Return find-and-replace edits that fix only this. Each "find" must be text copied exactly
-from the current page, long enough to occur exactly once in it; "replace" is its new text.
-Keep the page's existing wording, structure and style everywhere else: change as little as
-possible, and do not rewrite sentences that are still correct."""
-
-CREATE_PROMPT = """\
-The current documentation is in the <page> elements above. Write a new page {path}
-("{title}"), to fill this gap: {reason}
-
-Match the style of the existing pages, link to them where useful instead of repeating them,
-and return only the page's Markdown, starting with "# {title}"."""
-
-
-def apply_edits(text: str, edits: list[dict]) -> tuple[str, list[str]]:
-    failed = []
-    for edit in edits:
-        if text.count(edit["find"]) == 1:
-            text = text.replace(edit["find"], edit["replace"])
-        else:
-            failed.append(edit["find"][:80])
-    return text, failed
-
-
-def update(writer: DocsWriter, hint: str) -> list[str]:
-    print("Comparing the docs with the code ...", file=sys.stderr)
-    nav = read_nav()
-    changed = changed_since_docs()
-    extra = ""
-    if changed:
-        extra += ("\nCode files changed since the docs were last edited (check these first, "
-                  f"but the whole code counts):\n{changed}\n")
-    if hint:
-        extra += f"\nGuidance from the maintainer: {hint}\n"
-    changes = writer.call_json(REVIEW_PROMPT.format(nav=format_nav(nav), changed=extra),
-                               REVIEW_SCHEMA)["changes"]
-    existing = {p.relative_to(DOCS_DIR).as_posix() for p in DOCS_DIR.rglob("*.md")}
-    for c in changes:
-        check_path(c["path"])
-        if c["action"] in ("edit", "delete") and c["path"] not in existing:
-            c["action"] = "skip"
-        if c["action"] == "create" and c["path"] in existing:
-            c["action"] = "edit"
-    if not changes:
-        return []
-
-    # One call per page: several notes for the same page are merged into one.
-    merged: dict[str, dict] = {}
-    for c in changes:
-        if c["path"] in merged:
-            merged[c["path"]]["reason"] += " Also: " + c["reason"]
-        else:
-            merged[c["path"]] = dict(c)
-
-    def run(c: dict) -> tuple[dict, list[str]]:
-        page = DOCS_DIR / c["path"]
-        if c["action"] == "edit":
-            print(f"Editing {c['path']} ...", file=sys.stderr)
-            edits = writer.call_json(EDIT_PROMPT.format(**c), EDIT_SCHEMA, 32000)["edits"]
-            text, failed = apply_edits(page.read_text(encoding="utf-8"), edits)
-            page.write_text(text, encoding="utf-8")
-            return c, failed
-        if c["action"] == "create":
-            print(f"Writing {c['path']} ...", file=sys.stderr)
-            page.parent.mkdir(parents=True, exist_ok=True)
-            page.write_text(writer.write_page(CREATE_PROMPT.format(**c)), encoding="utf-8")
-        return c, []
-
-    with ThreadPoolExecutor(WORKERS) as pool:
-        results = list(pool.map(run, merged.values()))
-
-    summary = []
-    for c, failed in results:
-        if c["action"] == "skip":
-            continue
-        if c["action"] == "delete":
-            (DOCS_DIR / c["path"]).unlink(missing_ok=True)
-            nav = remove_from_nav(nav, c["path"])
-        if c["action"] == "create" and c["path"] not in nav_paths(nav):
-            nav = add_to_nav(nav, c["path"], c["section"], c["title"])
-        line = f"- **{c['action']}** `docs/{c['path']}`: {c['reason']}"
-        if failed:
-            line += (f"\n  - {len(failed)} edit(s) could not be applied (text not found exactly "
-                     "once), please check this page by hand.")
-        summary.append(line)
-    if nav != read_nav():
-        save_nav(nav, summary)
-    return summary
-
-
-def remove_from_nav(nav: list, path: str) -> list:
-    out = []
-    for entry in nav:
-        if isinstance(entry, str):
-            if entry != path:
-                out.append(entry)
-            continue
-        (title, value), = entry.items()
-        if isinstance(value, str):
-            if value != path:
-                out.append(entry)
-        elif rest := [v for v in value if v != path]:
-            out.append({title: rest})
-    return out
-
-
-def add_to_nav(nav: list, path: str, section: str, title: str) -> list:
-    if section:
-        for entry in nav:
-            if isinstance(entry, dict) and isinstance(entry.get(section), list):
-                entry[section].append(path)
-                return nav
-        return nav + [{section: [path]}]
-    return nav + [{title: path}]
-
-
 # --- main ---------------------------------------------------------------------------------
 
 def main() -> None:
-    if len(sys.argv) < 2 or sys.argv[1] not in ("make", "update"):
-        sys.exit("usage: write_docs.py make|update [hint for Claude]")
-    command, hint = sys.argv[1], " ".join(sys.argv[2:]).strip()
-    note = ""
-    if command == "update" and not any(DOCS_DIR.rglob("*.md")):
-        command, note = "make", "There were no pages in docs/ yet, so this built them from scratch (as `docs make`).\n\n"
+    if len(sys.argv) < 2 or sys.argv[1] != "make":
+        sys.exit("usage: write_docs.py make [hint for Claude]")
+    hint = " ".join(sys.argv[2:]).strip()
 
     code = load_code()
-    parts = [code] if command == "make" else [code, load_docs()]
-    print(f"{command}: model={MODEL} effort={EFFORT}, input about "
-          f"{sum(len(p) for p in parts) // 4:,} tokens of code and docs", file=sys.stderr)
-    writer = DocsWriter(system_blocks(*parts))
+    print(f"make: model={MODEL} effort={EFFORT}, input about {len(code) // 4:,} tokens of code",
+          file=sys.stderr)
+    writer = DocsWriter(system_blocks(code))
 
-    summary = make(writer, hint) if command == "make" else update(writer, hint)
+    summary = make(writer, hint)
 
     u = writer.usage
     usage = (f"{MODEL}, effort {EFFORT}: {u['input']:,} input, {u['cache_write']:,} cache write, "
              f"{u['cache_read']:,} cache read, {u['output']:,} output tokens")
     print(usage, file=sys.stderr)
-    text = note + ("\n".join(summary) if summary else "The docs match the code; nothing to change.")
-    text += f"\n\n<sub>{usage}</sub>\n"
+    text = "\n".join(summary) + f"\n\n<sub>{usage}</sub>\n"
     if summary_file := os.environ.get("SUMMARY_FILE"):
         Path(summary_file).write_text(text, encoding="utf-8")
     else:

@@ -66,7 +66,7 @@ For commands that act, the server asks GitHub for the sender's permission on the
 
 | Command | Without write access |
 |---|---|
-| `docs ask`, `docs make`, `docs update` | The bot comments that the command is only for people with write access |
+| `ask`, `update`, `make` | The bot comments that the command is only for people with write access |
 | `help` | No reply, so that mentioning the bot does not make it talk |
 | `signoff` in a comment or new issue | The assistant comments that it only answers people with write access |
 | the signoff issue form | The request script comments that only people with write access can request a signoff |

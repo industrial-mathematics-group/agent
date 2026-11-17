@@ -7,9 +7,9 @@ IMGAgent is the GitHub bot of the Industrial Mathematics Group, run as one small
 | Command | Where | What happens |
 |---|---|---|
 | `@IMGAgent signoff` and your words | New issue or issue comment | Claude turns your words into the answers of the signoff form. IMGAgent opens a `SIGNOFF.toml` pull request, or asks what is missing. |
-| `@IMGAgent docs ask <question>` | Start of a comment, or a new issue | Claude answers from the pages in `docs/`. |
-| `@IMGAgent docs make [hint]` | Start of a comment | Claude rebuilds `docs/` from the code. IMGAgent opens a pull request. |
-| `@IMGAgent docs update [hint]` | Start of a comment | Claude fixes only what is outdated in `docs/`. IMGAgent opens a pull request. |
+| `@IMGAgent ask <folder> <question>` | Start of a comment, or a new issue | Claude answers from the files in that folder, for example `docs` or `src`. |
+| `@IMGAgent update <folder> <task>` | Start of a comment | Claude edits existing files in that folder and at the top level. IMGAgent opens a pull request. |
+| `@IMGAgent make docs [hint]` | Start of a comment | Claude rebuilds `docs/` from the code. IMGAgent opens a pull request. |
 | `@IMGAgent help` | Start of a comment | The list of commands. |
 | The issue form *Signoff: declare or attest files* | New or edited issue | IMGAgent opens the `SIGNOFF.toml` pull request without AI. This can be switched off with `IMGAGENT_SIGNOFF_FORM`. |
 

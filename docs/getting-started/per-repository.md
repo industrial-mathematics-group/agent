@@ -7,18 +7,18 @@ IMGAgent needs no workflow files in the repositories it serves. Once the App is 
 | Command | What the repository needs |
 |---|---|
 | `@IMGAgent help` | Nothing. |
-| `@IMGAgent docs ask <question>` | A `docs/` folder. Without one, IMGAgent replies that there is no `docs/` folder to answer from. |
-| `@IMGAgent docs make [hint]` | Nothing. It creates `docs/` and `zensical.toml` if they are missing. |
-| `@IMGAgent docs update [hint]` | Normally an existing `docs/`. If there are no Markdown pages in `docs/` yet, it builds them from scratch, as `docs make` would. |
+| `@IMGAgent ask <folder> <question>` | The folder you name. Without it, IMGAgent replies that there is no such path. |
+| `@IMGAgent update <folder> <task>` | The folder you name, with the files to change already in it: `update` never creates files. |
+| `@IMGAgent make docs [hint]` | Nothing. It creates `docs/` and `zensical.toml` if they are missing. |
 | `@IMGAgent signoff` and the issue form *Signoff: declare or attest files* | A `SIGNOFF.toml` in the repository. |
 
 ### Documentation
 
-`docs make` and `docs update` write a Zensical site: Markdown pages in `docs/` and the navigation in `zensical.toml`.
+`make docs` writes a Zensical site: Markdown pages in `docs/` and the navigation in `zensical.toml`.
 
-- If the repository has no `zensical.toml`, `docs make` creates a complete one, with theme, Markdown extensions and `nav`.
+- If the repository has no `zensical.toml`, `make docs` creates a complete one, with theme, Markdown extensions and `nav`.
 - If a `zensical.toml` already exists, everything in it is kept except the `nav`, which is replaced by the new page structure.
-- `docs ask` only reads `docs/`. It does not need `zensical.toml`.
+- `ask docs` and `update docs` only need `docs/`. They do not need `zensical.toml` (`update docs` edits it only because it is a top-level file).
 
 !!! note
     IMGAgent does not add a workflow that publishes the site, because the App has no permission to change `.github/workflows/`. Add the publishing workflow by hand once.
@@ -57,7 +57,7 @@ url = "https://industrial-mathematics-group.github.io/agent-sandbox/"   # "none"
 |---|---|
 | `about` | One sentence on what the project is. Defaults to the repository description. |
 | `audience` | Who reads the docs. Defaults to "people who use" the project. |
-| `url` | The published site. Answers from `docs ask` link to pages under this address. Defaults to `https://<owner>.github.io/<repository>/` with the owner in lowercase. Set it to `"none"` (or an empty string) to have answers cite paths under `docs/` instead of links. |
+| `url` | The published site. Answers from `ask docs` link to pages under this address. Defaults to `https://<owner>.github.io/<repository>/` with the owner in lowercase. Set it to `"none"` (or an empty string) to have answers cite paths under `docs/` instead of links. |
 | `project` | The project's name. Defaults to the repository name. |
 
 If the file is not valid TOML, it is ignored and the defaults are used.

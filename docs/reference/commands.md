@@ -8,7 +8,7 @@ The name after `@` is `IMGAgent` by default and can be changed with `IMGAGENT_HA
 
 Only people with admin, maintain or write permission on the repository get an answer. Comments and issues from bots are always ignored, so IMGAgent cannot trigger itself.
 
-- For `docs ask`, `docs make` and `docs update`, a person without write access gets a short comment saying the command needs write access.
+- For `ask`, `update` and `make`, a person without write access gets a short comment saying the command needs write access.
 - For `help`, a person without write access gets no reply at all.
 - For `signoff`, the signoff assistant script checks the permission and replies in the issue.
 
@@ -16,48 +16,69 @@ See [access control](allowed-owners.md) for the other checks that happen before 
 
 ## Overview
 
+Commands are written as `@IMGAgent <action> <target>`, followed by your question, task or hint.
+
 | Command | Recognised | What happens |
 |---|---|---|
 | `@IMGAgent signoff <your words>` | Anywhere in a new issue or in a comment on an open issue; not in pull requests | Claude turns your words into the answers of the signoff form. IMGAgent opens a `SIGNOFF.toml` pull request, or asks what is missing |
-| `@IMGAgent docs ask <question>` | Start of a comment, or in the title or body of a new issue | Claude answers from the pages in `docs/` |
-| `@IMGAgent docs make [hint]` | Start of a comment | Claude rebuilds `docs/` from the code; IMGAgent opens a pull request |
-| `@IMGAgent docs update [hint]` | Start of a comment | Claude fixes only what is outdated in `docs/`; IMGAgent opens a pull request |
+| `@IMGAgent ask <folder> <question>` | Start of a comment, or in the title or body of a new issue | Claude answers from the files in that folder, for example `docs` or `src` |
+| `@IMGAgent update <folder> <task>` | Start of a comment | Claude edits existing files in that folder and at the top level of the repository; IMGAgent opens a pull request |
+| `@IMGAgent make docs [hint]` | Start of a comment | Claude rebuilds `docs/` from the code; IMGAgent opens a pull request |
 | `@IMGAgent help` | Start of a comment | Lists the commands |
 | Issue form *Signoff: declare or attest files* | New, edited or reopened issue | IMGAgent opens the `SIGNOFF.toml` pull request without AI |
 
 "Start of a comment" means the first line of the comment begins with `@IMGAgent`. A mention further down is not a command, except for `signoff`.
 
+## Targets
+
+The target is a folder or file of the repository, as a relative path: `docs`, `src`, `src/package` or `pyproject.toml`. A leading `./` and a trailing `/` are ignored. IMGAgent refuses targets with `..`, an absolute path, `.git` or glob characters, and answers with the list of commands and what is wrong. After cloning, the target must exist and must not lead outside the repository through a symlink; otherwise IMGAgent says there is no such path.
+
+Only tracked text files are read. Binary files, images, lock files, `LICENSE` and files over 200 kB are left out. If the files of a target add up to more than about 150k tokens, IMGAgent says so instead of answering: name a smaller folder.
+
 ## `help`
 
-`@IMGAgent help` posts the table of commands. A comment that starts with `@IMGAgent` followed by anything that is not a known command also gets this list, with a line saying that the command is not known. A bare `@IMGAgent` shows the list too.
+`@IMGAgent help` posts the table of commands. A comment that starts with `@IMGAgent` followed by anything that is not a known command also gets this list, with a line saying what is wrong. A bare `@IMGAgent` shows the list too. The old form `@IMGAgent docs ask` (or `docs make`, `docs update`) gets the list with a hint at the new order.
 
-## `docs ask`
-
-```text
-@IMGAgent docs ask How do I add a host to the allowlist?
-```
-
-Everything after `docs ask` is the question and may span several lines. In a new issue, the title and body are sent together as the question, and the phrase can appear anywhere in them.
-
-IMGAgent adds an `eyes` reaction to your comment, takes a shallow clone of the repository containing only `docs/` and `.github/imgagent.toml`, and posts Claude's answer as a comment. The model is set by `DOCS_ASK_MODEL`. If the question is empty, IMGAgent asks you to write one. If the repository has no `docs/` folder, it says so.
-
-## `docs make` and `docs update`
+## `ask`
 
 ```text
-@IMGAgent docs make
-@IMGAgent docs update the slurm add-on gained new options
+@IMGAgent ask docs How do I add a host to the allowlist?
+@IMGAgent ask src Where is the webhook signature checked?
 ```
 
-Both commands must start the comment. An optional hint after the command, on the same line only, is passed to Claude as guidance. Later lines are ignored.
+Everything after the target is the question and may span several lines. In a new issue, the title and body are sent together as the question, and the phrase `@IMGAgent ask <folder>` can appear anywhere in them.
 
-| Command | Effect |
-|---|---|
-| `docs make` | Rebuilds the documentation from the code. Claude plans the pages, then writes each one. Markdown pages under `docs/` that are not in the new plan are removed |
-| `docs update` | Compares the existing docs with the code and fixes only what is outdated or missing, so correct text stays unchanged |
+IMGAgent adds an `eyes` reaction to your comment, takes a shallow clone of the repository containing only the target and `.github/imgagent.toml`, and posts Claude's answer as a comment. Claude only sees the target. Answers from `docs` link to the published pages when a site URL is known; answers from other folders name the files they used. The model is set by `ASK_MODEL`. If the question is empty, IMGAgent asks you to write one.
 
-IMGAgent reacts with `eyes`, works in a full clone of the default branch, and commits changes to `docs/` and `zensical.toml` on a new branch named `<app-slug>/docs-<command>-<random>`. It opens a pull request against the default branch and posts the link in the issue or pull request where you asked. If nothing changed, it only comments with the summary and opens no pull request.
+## `update`
 
-The model is set by `DOCS_WRITER_MODEL` and `DOCS_WRITER_EFFORT`.
+```text
+@IMGAgent update src require Python 3.13 instead of 3.12
+@IMGAgent update docs the install page moved to getting-started/install.md, fix the links
+```
+
+`update` is for small tasks that touch several existing files. The text after the target, which may span several lines, is the task; it is required.
+
+Claude sees the target and the text files at the top level of the repository, such as `pyproject.toml` and `README.md`, and may only change those files. It is told never to create, delete or rename files, and the script can only apply find-and-replace edits to files it was given, so it cannot. Files under `.github/workflows/` are never changed, because the App may not push them. If the task needs a new file or a file outside this scope, the pull request says what is left to do.
+
+IMGAgent reacts with `eyes`, works in a clone of the default branch, and commits only the modified files in scope on a new branch named `<app-slug>/update-<target>-<random>`. It opens a pull request against the default branch, with the task and a list of the changed files and why, and posts the link where you asked. If nothing changed, it only comments with the summary.
+
+The model is set by `WRITER_MODEL` and `WRITER_EFFORT`.
+
+## `make docs`
+
+```text
+@IMGAgent make docs
+@IMGAgent make docs focus on deployment and operations
+```
+
+`make` creates files, which depends much more on the task than `update`, so `docs` is the only target for now. An optional hint after `make docs` is passed to Claude as guidance.
+
+Claude rebuilds the documentation from the code: it plans the pages, then writes each one. Markdown pages under `docs/` that are not in the new plan are removed, and the nav in `zensical.toml` follows (a complete `zensical.toml` is created when there is none).
+
+IMGAgent reacts with `eyes`, works in a full clone of the default branch, and commits changes to `docs/` and `zensical.toml` on a new branch named `<app-slug>/make-docs-<random>`. It opens a pull request against the default branch and posts the link in the issue or pull request where you asked. If nothing changed, it only comments with the summary and opens no pull request.
+
+The model is set by `WRITER_MODEL` and `WRITER_EFFORT`.
 
 ## `signoff`
 
@@ -81,9 +102,9 @@ This is on by default. Set `IMGAGENT_SIGNOFF_FORM=false` to leave these issues t
 
 IMGAgent never pushes to a default branch. Every change arrives as a pull request.
 
-- For `docs make` and `docs update`, the requester is assigned to the pull request. The description is the organisation's pull request template, filled in: AI generation G3, the writing model ticked, AI review A0, and the requester named as the responsible person. The requester ticks their own human review before merging.
+- For `make docs` and `update`, the requester is assigned to the pull request. The description is the organisation's pull request template, filled in: AI generation G3, the writing model ticked, AI review A0, and the requester named as the responsible person. The requester ticks their own human review before merging.
 - For signoff, the pull request description follows the organisation's template as well, and the requester is assigned and asked for review.
 
-Jobs for the same issue run one after another. All `docs make` and `docs update` jobs of a repository also share one queue, so two documentation rebuilds never run at the same time. Jobs for different issues and repositories run in parallel, up to `IMGAGENT_WORKERS`.
+Jobs for the same issue run one after another. All `make` and `update` jobs of a repository also share one queue, so two jobs that open pull requests never run at the same time. Jobs for different issues and repositories run in parallel, up to `IMGAGENT_WORKERS`.
 
 If a job fails, IMGAgent comments that it could not finish and points to the server log. See [troubleshooting](../operations/troubleshooting.md).
