@@ -1,50 +1,41 @@
-# Prepare a repository
+# Per-repository setup
 
-IMGAgent needs no workflow files in the repositories it serves. Once the App is installed on a repository, what you may need to add depends on which commands people will use.
+A repository needs no workflow files or other setup for IMGAgent to work in it. This page lists what individual commands expect to find, the optional settings file, and how to move a repository over from the older GitHub Actions bots.
 
 ## What each command needs
 
 | Command | What the repository needs |
 |---|---|
-| `@IMGAgent help` | Nothing. |
-| `@IMGAgent ask <folders>` and a question | The folders you name. If one is missing, IMGAgent replies that there is no such path. |
-| `@IMGAgent update <folders> [with <folders>]` and a task | The folders you name, with the files to change already in them: `update` never creates files. |
-| `@IMGAgent make docs [with <folders>]` | Nothing. It creates `docs/` and `zensical.toml` if they are missing. |
-| `@IMGAgent signoff` and the issue form *Signoff: declare or attest files* | A `SIGNOFF.toml` in the repository. |
+| `ask`, `update` | Only the folders or files you name. Each one must exist in the repository. |
+| `make docs` | Nothing. It creates `docs/` and `zensical.toml` if they are missing. |
+| `signoff` and the signoff issue form | A `SIGNOFF.toml`, created once with `aisignoff init`. |
+| `help` | Nothing. |
 
-### Documentation
+### `make docs` and Zensical
 
-`make docs` writes a Zensical site: Markdown pages in `docs/` and the navigation in `zensical.toml`.
+`make docs` writes a [Zensical](https://zensical.org) site, which consists of the Markdown pages in `docs/` and the configuration file `zensical.toml`.
 
-- If the repository has no `zensical.toml`, `make docs` creates a complete one, with theme, Markdown extensions and `nav`.
-- If a `zensical.toml` already exists, everything in it is kept except the `nav`, which is replaced by the new page structure.
-- `ask docs` and `update docs` only need `docs/`. They do not need `zensical.toml` (`update docs` edits it only because it is a top-level file).
+- **Without `zensical.toml`:** IMGAgent creates a complete file with the site settings, theme, Markdown extensions and `nav`.
+- **With an existing `zensical.toml`:** IMGAgent keeps everything in it and replaces only `nav`.
 
-!!! note
-    IMGAgent does not add a workflow that publishes the site, because the App has no permission to change `.github/workflows/`. Add the publishing workflow by hand once.
+!!! warning
+    `make docs` is a full rebuild. Every Markdown page under `docs/` is rewritten, and pages that are not in the new plan are removed. Other files in `docs/`, such as images, stay. If you want to keep hand-written pages, restore them during review of the pull request. For small changes to existing pages, use `@IMGAgent update docs with src` instead.
 
-### Signoff
+See [make docs](../usage/make-docs.md) for details.
 
-Signoff requests are written into `SIGNOFF.toml` with the `aisignoff` tool. Create the file once, in the repository:
+### `signoff` and `SIGNOFF.toml`
+
+The signoff assistant and the issue form *Signoff: declare or attest files* both record their results in `SIGNOFF.toml`. If the file is missing, IMGAgent refuses the request and asks a maintainer to create the file once:
 
 ```bash
 aisignoff init
 ```
 
-Without `SIGNOFF.toml`, signoff requests are rejected with the instruction to create it. The pull requests that IMGAgent opens follow the organisation's pull request template, so the *PR-signoff* check can read them. They are opened as the App's pull requests, so the repository's checks start as for any other pull request.
+The resulting pull requests follow the organisation's PR template, so the *PR-signoff* check runs on them. They are opened by a GitHub App, so they trigger the repository's checks like any other pull request. See [signoff](../usage/signoff.md).
 
-## Moving from the GitHub Actions bots
+## Optional: `.github/imgagent.toml`
 
-If a repository still runs the older Actions versions of these bots, delete their files so that two bots do not answer the same comment:
-
-- `docs-bot.yml` and `docs-writer.yml` in `.github/workflows/`
-- the `.github/docs-bot/` folder
-- the caller workflow of the Signoff-Assistant
-- the caller workflow of Signoff-Request, but only while `IMGAGENT_SIGNOFF_FORM=true`. If you set it to `false`, leave this workflow in place: it then handles the form issues.
-
-## Optional settings: `.github/imgagent.toml`
-
-By default, IMGAgent tells Claude about a repository using its name and its GitHub description. To give Claude more context for the docs commands, add `.github/imgagent.toml` on the default branch:
+To give Claude more context than the repository description, add `.github/imgagent.toml` to the default branch:
 
 ```toml
 [docs]
@@ -53,13 +44,56 @@ audience = "people who deploy and run agent-sandbox on their own Linux machines"
 url = "https://industrial-mathematics-group.github.io/agent-sandbox/"   # "none": answers cite paths instead
 ```
 
-| Key | Meaning |
-|---|---|
-| `about` | One sentence on what the project is. Defaults to the repository description. |
-| `audience` | Who reads the docs. Defaults to "people who use" the project. |
-| `url` | The published site. Answers from `ask docs` link to pages under this address. Defaults to `https://<owner>.github.io/<repository>/` with the owner in lowercase. Set it to `"none"` (or an empty string) to have answers cite paths under `docs/` instead of links. |
-| `project` | The project's name. Defaults to the repository name. |
+Every key is optional. If a key is missing:
 
-If the file is not valid TOML, it is ignored and the defaults are used.
+- `about` falls back to the repository description.
+- `url` falls back to `https://<owner>.github.io/<repository>/`.
 
-For every key, see the [configuration reference](../reference/index.md).
+If the file is not valid TOML, IMGAgent logs a warning and ignores the file. All keys, including `project`, are described in [Repository settings file](../reference/repo-config.md).
+
+## Moving over from the GitHub Actions bots
+
+If IMGAgent and the old workflows both run in a repository, both bots answer the same commands. Delete these files from the repository:
+
+- `docs-bot.yml`
+- `docs-writer.yml`
+- `.github/docs-bot/`
+- the workflow that calls Signoff-Assistant
+- the workflow that calls Signoff-Request, if `IMGAGENT_SIGNOFF_FORM` is on (the default `true`). With `IMGAGENT_SIGNOFF_FORM=false`, IMGAgent leaves issue forms alone, and that workflow keeps handling them.
+
+## Publishing the docs on GitHub Pages
+
+The GitHub App has no *Workflows* permission, and IMGAgent never changes `.github/workflows/`. Neither `make docs` nor `update` can add a Pages workflow, so add one by hand once.
+
+1. In the repository, open *Settings → Pages* and set *Source* to *GitHub Actions*.
+2. Add a workflow such as `.github/workflows/docs.yml`:
+
+    ```yaml
+    on: { push: { branches: [main] } }
+    permissions: { contents: read, pages: write, id-token: write }
+    jobs:
+      deploy:
+        environment: { name: github-pages, url: "${{ steps.deployment.outputs.page_url }}" }
+        runs-on: ubuntu-latest
+        steps:
+          - uses: actions/configure-pages@v6
+          - uses: actions/checkout@v7
+          - uses: actions/setup-python@v6
+            with: { python-version: 3.x }
+          - run: pip install zensical      # pin it, e.g. zensical==0.1.1, so a release can't break the build
+          - run: zensical build --clean
+          - uses: actions/upload-pages-artifact@v5
+            with: { path: site }
+          - uses: actions/deploy-pages@v5
+            id: deployment
+    ```
+
+The site is then published at `https://<owner>.github.io/<repo>/`. Use that address as `site_url` in `zensical.toml`. This matches the default `url` that IMGAgent uses when `.github/imgagent.toml` does not set one.
+
+To preview the site locally:
+
+```bash
+pip install zensical
+zensical serve              # http://localhost:8000
+zensical build --clean      # static site in site/
+```

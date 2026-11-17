@@ -1,132 +1,161 @@
 # Troubleshooting
 
-This page lists what IMGAgent does when something is wrong, which message you will see, and what to change. Most problems show up in the container log or in the App's *Advanced → Recent Deliveries* list on GitHub.
+This page covers the cases where IMGAgent does not start, stays silent, or replies that it could not finish a command. Most problems show up in one of three places: the container log, the App's *Recent Deliveries* page on GitHub, or a comment from `imgagent[bot]` in the issue.
 
 ## Where to look
 
-**The container log.** The server logs to standard output. In Dockge, open the stack's log; without Dockge, run `docker compose logs -f imgagent`. The log level comes from `LOG_LEVEL` (default `INFO`). Set `LOG_LEVEL=DEBUG` in `.env` and restart the stack for more detail.
+| Place | What it tells you |
+|---|---|
+| Container log | Startup checks, every delivery and its outcome, the output of the scripts, and tracebacks of failed jobs |
+| *Recent Deliveries* (App settings → *Advanced*) | The HTTP status and one-line reason the server returned for each event |
+| The issue itself | Replies about wrong commands, missing paths, missing access, and failed jobs |
 
-**Recent Deliveries.** On the App's settings page, *Advanced → Recent Deliveries* shows each webhook GitHub sent and the response text the server returned. Most of the messages below appear there.
+The container is called `imgagent` in `compose.yaml`, so you can read its log with:
 
-At startup the server logs what GitHub knows about the App. A healthy start includes these lines:
+```bash
+docker logs -f imgagent
+```
 
-```text
+You can also run `docker compose logs -f` in the stack folder, or open the stack's log in Dockge. Each delivery produces a line like `delivery <id> issue_comment.created: queued ask`. Script output appears indented as `  | ...` lines.
+
+## The container does not start
+
+`entrypoint.sh` and the server check the settings before anything else, and exit with a message if one is missing.
+
+`IMGAgent: can't read the private key at /run/secrets/imgagent_private_key`
+:   The key file exists but the container cannot read it. The container runs as uid 10001. Make the file readable with `chmod 644 imgagent.pem` in the stack folder. If you set `IMGAGENT_PRIVATE_KEY_FILE` yourself, the path in the message is that one. See [Private key](../reference/private-key.md).
+
+`IMGAgent: missing settings: ... (see .env.example)`
+:   One or more of `IMGAGENT_APP_ID`, `IMGAGENT_WEBHOOK_SECRET`, `IMGAGENT_ALLOWED_OWNERS` and `ANTHROPIC_API_KEY` are empty. `IMGAGENT_PRIVATE_KEY_FILE (or IMGAGENT_PRIVATE_KEY)` is listed when no key was found, or when the key does not contain `PRIVATE KEY`. This can happen when `imgagent.pem` is missing and `IMGAGENT_PRIVATE_KEY` is not set, or when the one-line key in `.env` is incomplete. Fill these in `.env`. See [Environment variables](../reference/index.md).
+
+The container has a health check that requests `/healthz` every 30 seconds. If `docker ps` shows the container as unhealthy, the server is not listening on `PORT`.
+
+## Startup warnings from the App check
+
+After a successful start, the server asks GitHub about the App and logs the answer:
+
+```
 signed in as the GitHub App imgagent; answering @IMGAgent
-app events: ...; permissions: ...
+app events: issue_comment, issues; permissions: contents=write, issues=write, metadata=read, pull_requests=write
 installed on: industrial-mathematics-group
 listening on :8080 (allowed owners: industrial-mathematics-group)
 ```
 
-## The container does not start
+The server keeps running even if this check fails or warns. Each of the following warnings means some or all commands will go unanswered.
 
-### `IMGAgent: missing settings: ...`
-
-The server exits at once if a required setting is empty. The message names what is missing:
-
-| Name in the message | Set this in `.env` |
+| Log message | Cause and fix |
 |---|---|
-| `IMGAGENT_APP_ID` | the App ID shown at the top of the App's settings page |
-| `IMGAGENT_WEBHOOK_SECRET` | the webhook secret you entered in the App's settings |
-| `IMGAGENT_ALLOWED_OWNERS` | the accounts that may use the bot, comma-separated |
-| `ANTHROPIC_API_KEY` | a Claude Console API key |
-| `IMGAGENT_PRIVATE_KEY_FILE (or IMGAGENT_PRIVATE_KEY)` | see the next entry |
+| `could not reach GitHub as the app (check IMGAGENT_APP_ID and the private key): ...` | The App ID or the private key is wrong, or GitHub was unreachable at startup. Check both values and restart. |
+| `the App is not subscribed to 'issues' events` (or `'issue_comment'`) | Tick **Issues** and **Issue comment** under the App's settings → *Permissions & events* → *Subscribe to events*. |
+| `the App lacks contents: write (has ...)` (also `issues`, `pull_requests`) | Set that repository permission to *Read and write*. See [Register and install the GitHub App](../getting-started/github-app.md). |
+| `IMGAGENT_ALLOWED_OWNERS names <owner>, but the App isn't installed there` | Install the App on that account, or correct the name in `.env`. |
+| `the installation on <owner> doesn't receive issues, issue_comment yet` | After you change the App's events or permissions, an owner of the account must accept them under *Settings → GitHub Apps → IMGAgent → Review request*. |
 
-The last entry is also reported when a private key was found but does not contain `PRIVATE KEY`, for example when the wrong file was copied or the one-line variable lost its `\n` line breaks. See [the private key](../reference/private-key.md).
+## Reading Recent Deliveries
 
-### `IMGAgent: can't read the private key at ...`
+Every webhook delivery gets a short plain-text response that is shown in *Recent Deliveries*. The same text is written to the log.
 
-`entrypoint.sh` checks that the key file can be read before starting. The container runs as the unprivileged user with uid 10001, so the file on the host must be readable by others:
-
-```bash
-chmod 644 imgagent.pem
-```
-
-Also check that `imgagent.pem` exists next to `compose.yaml`, because the compose secret is read from `./imgagent.pem`.
-
-### `could not reach GitHub as the app`
-
-If this error appears in the log, the server keeps running but the startup check failed. Check `IMGAGENT_APP_ID` and the private key: the key must belong to this App. GitHub may also have been briefly unreachable; restart the stack to repeat the check.
-
-## GitHub cannot deliver
-
-### `401 bad signature`
-
-The server verifies the `X-Hub-Signature-256` header of every delivery against `IMGAGENT_WEBHOOK_SECRET`. A delivery that fails gets `401`, and the log says `rejected a delivery with a bad signature`. Make the secret in `.env` identical to the one in the App's settings, restart the stack, and redeliver from *Recent Deliveries*. Requests that do not come from GitHub, or are unsigned, get the same answer.
-
-### `400 bad length` or `400 bad json`
-
-The body was empty, larger than 25 MB, or not JSON. GitHub does not normally send such deliveries; a misconfigured reverse proxy that alters the request is the likely cause.
-
-## Deliveries arrive but nothing happens
-
-A delivery that is accepted but starts no job gets status `202`, and the response text says why. The same text goes into the log.
-
-| Response text | Cause and fix |
+| Status and text | Meaning |
 |---|---|
-| `ignored: owner <name> is not in IMGAGENT_ALLOWED_OWNERS` | The repository's owner is not in the allowlist. Add it to `IMGAGENT_ALLOWED_OWNERS` and restart. See [access control](../reference/allowed-owners.md). |
-| `ignored: <event> has no repository or installation` | The event is not tied to an installation, for example one sent from outside the App. Nothing to fix. |
-| `ignored: ... no @IMGAgent in '...'` | The comment or issue does not contain the handle. Check the spelling; the handle is set by `IMGAGENT_HANDLE`. |
-| `ignored: ... @IMGAgent found but no command ...`, `... only read when it is opened, edited or reopened`, `... the edit didn't turn ...` | The handle is there but no command follows it, the issue event isn't `opened`, or an edit changed a command that had already run. See below. |
-| `ignored: sent by the bot <login>` | Bots are never answered. |
-| `ignored: IMGAgent doesn't use <event> events` | The App sends event types other than `issues` and `issue_comment`. Unsubscribe from them; they are harmless. |
-| `already handled` (status `200`) | The delivery id was seen before. Redelivering the same delivery does nothing; write a new comment instead. |
-| `pong` (status `200`) | The answer to GitHub's `ping`. This means the connection works. |
-| `queued <kind>` (status `202`) | A job was started. Its result appears as a comment or pull request. |
+| `200 pong` | The App's `ping` arrived. The webhook works. |
+| `401 bad signature` | The webhook secret in the App settings and `IMGAGENT_WEBHOOK_SECRET` differ. The log shows `rejected a delivery with a bad signature from <address>`. |
+| `400 bad length` / `400 bad json` | The body was empty, larger than 25 MB, or not JSON. |
+| `404 not found` | The request went to a path other than `/webhook`. Check the Webhook URL and your reverse proxy. |
+| `200 already handled` | The server has already received a delivery with this id since it started. It remembers the last 1000. To run a command again, write a new comment. |
+| `202 ignored: owner <owner> is not in IMGAGENT_ALLOWED_OWNERS` | The installation belongs to an account that is not listed. Add it to `IMGAGENT_ALLOWED_OWNERS`. |
+| `202 ignored: <event> has no repository or installation` | The event is not about a repository of an installation. |
+| `202 queued <kind>` | A job was started. If nothing happens in the issue, see the sections below. |
 
-### The handle is there but no command is recognised
+If no deliveries arrive at all, GitHub cannot reach the server. See [Expose it to GitHub](../getting-started/expose.md).
 
-- `ask`, `update`, `make` and `help` must follow `@IMGAgent` directly (`@IMGAgent ask docs`), on any line, but not inside code or a quoted line (`> ...`).
-- Commands in an issue are read when the issue is opened. Editing or reopening the issue runs its command only while IMGAgent has not commented on it yet (the log says `not run, IMGAgent already commented on this issue` otherwise); write a comment instead.
-- Editing a comment runs its command only if it had no command that ran before.
-- `signoff` can appear anywhere in the text, but only in an **open issue** (not a pull request, not a closed issue), and not in an issue made with the signoff form.
-- A mention inside a longer word, an e-mail address, a path or inline code (`` `@IMGAgent signoff` ``) is not a command.
+### Why an event started nothing
 
-See [commands](../reference/commands.md) for the full rules.
+When an event does not contain a command, the response is `202 ignored:` followed by one of these reasons.
 
-## Startup warnings about the App
+`sent by the bot <login>`
+:   IMGAgent never answers bots, including itself.
 
-After signing in, the server compares the App's settings with what it needs and logs a warning for each gap. Warnings do not stop the server, but the commands they affect will not work.
+`IMGAgent doesn't use <event> events`
+:   Only `issues` and `issue_comment` are used. The App can be subscribed to fewer events.
 
-### `the App is not subscribed to 'issues' (or 'issue_comment') events`
+`no @IMGAgent in '...'`
+:   The text does not mention the handle. If you changed `IMGAGENT_HANDLE`, people must write that name.
 
-Open the App's settings, *Permissions & events → Subscribe to events*, and tick **Issues** and **Issue comment**.
+`commands in an issue are only read when it is opened, edited or reopened`
+:   For example, closing or labelling an issue does not start anything.
 
-### `the App lacks contents: write (has ...)`
+`neither title nor body changed, or there is no command in them`
+:   An issue edit that does not touch the title or body, such as a label change, is not read.
 
-The same warning exists for `issues` and `pull_requests`. In the App's repository permissions, set **Contents**, **Issues** and **Pull requests** to *Read and write*.
+`the edit didn't turn a comment without a command into one`
+:   Editing a comment runs its command only if the old text had no command that ran. This means fixing a typo in a working command does not run it a second time.
 
-### `IMGAGENT_ALLOWED_OWNERS names <owner>, but the App isn't installed there`
+`@IMGAgent found but no command: write @IMGAgent <ask|update|make|help> ...`
+:   The handle is there, but no command follows it. A common cause is a command inside a code block or a quoted line (`> ...`), because these are skipped. Another is `@IMGAgent signoff` in a closed issue, a pull request, or an issue made with the signoff form, because the assistant only answers in open issues. See [Commands](../usage/index.md).
 
-The allowlist contains an account that has no installation of the App. Install the App on that account, or remove the name from the allowlist.
+## The job was queued but nobody answered
 
-### `the installation on <account> doesn't receive ... yet`
+These are the cases where a delivery says `queued ...` but no comment appears.
 
-After you change an App's permissions or events, each installation owner must accept the change. An owner of the account opens *Settings → GitHub Apps → IMGAgent* and chooses *Review request*. Until then, GitHub does not send the new events to that installation.
+- **`help` from someone without write access.** `help` gets no reply in this case, so a mention by anyone cannot make the bot talk. The log shows `<login> has read permission on <repo>: not answering`. Other commands get a reply instead: ``` `@IMGAgent ask docs` is only for people with write access to this repository. ```
+- **An edited or reopened issue that IMGAgent already answered.** A command in an issue runs on edit or reopen only while IMGAgent has not commented on the issue yet. Only the first 100 comments are checked. The log shows `not run, IMGAgent already commented on this issue (write a new comment instead)`. Write the command in a new comment.
+- **A job is waiting.** Jobs run on `IMGAGENT_WORKERS` threads, which is 2 by default. `make` and `update` in the same repository run one after the other, as do jobs in the same issue. A long `make docs` can therefore delay the next one.
 
-## The bot replies, but not as expected
+Most jobs add an eyes reaction to the comment when they start. If the reaction appears but no answer follows, the job is still running or has failed.
 
-### `<command> is only for people with write access to this repository.`
+## "IMGAgent couldn't finish this"
 
-The person who wrote the command has no write, maintain or admin permission on the repository. Only such people are answered. For `help`, nobody without write access gets a reply at all, so that a stray `@IMGAgent` in a comment does not make the bot talk. For the signoff assistant, the same restriction is stated in its own wording.
+When a job raises an error, IMGAgent comments:
 
-### `there is no <folder> in this repository.`
+> @you IMGAgent couldn't finish this (`make`). A maintainer can find the details in the IMGAgent server log.
 
-Every folder you name, also after `with`, needs to exist on the default branch. Check the spelling (paths are case sensitive), or run `@IMGAgent make docs` first for `docs`.
+In the log, look for `<kind> failed for <repo>#<number>` followed by a traceback. Scroll up to the `  | ...` lines for the script's own output. Common causes:
 
-### `IMGAgent couldn't finish this (<kind>). A maintainer can find the details in the IMGAgent server log.`
+| In the log | Cause |
+|---|---|
+| `ask.py failed`, `write_docs.py failed`, `update.py failed`, `assistant.py failed`, `request.py failed` | The script exited with an error. Its output, logged just before this line, says why. |
+| `Claude declined this request.` | The model refused. Rephrase the question, task or hint. |
+| `The answer hit max_tokens (...) and was cut off.` | One answer was too long. For `make docs`, ask for smaller pages in the hint. |
+| `TimeoutExpired` | The script ran longer than its limit: 5 minutes for `ask`, 45 minutes for `make` and `update`, and 10 minutes for the signoff scripts. |
+| `GitHub API 4xx: ...` | A GitHub call was refused, for example because a permission is missing. |
 
-A job raised an error, for example a failed clone, a failed script, a Claude API error or a refused push. The comment names only the kind of job (`ask`, `update`, `make`, `signoff`, `signoff-form`). Find the cause in the container log: look for the line `<kind> failed for <repo>#<number>` and the traceback after it. Output of the scripts is logged line by line with a `|` prefix. Set `LOG_LEVEL=DEBUG` if the default log is not enough.
+If the failure comment itself cannot be posted, the log shows `could not report the failure`.
 
-### `make docs` or `update` made no pull request
+## Replies about the command
 
-If nothing needed to change, the bot replies in a comment with the first line of the summary instead of opening a pull request. This is not an error. For `update`, the summary also says when Claude wanted a file it may not change, such as a new file or one outside the target.
+These replies come from IMGAgent when the command cannot be carried out as written. Each one includes the right syntax.
 
-### Signoff: `This repository has no SIGNOFF.toml yet`
+| Reply | What to do |
+|---|---|
+| `` `ask` needs a folder: ...`` | Name at least one folder, such as `@IMGAgent ask docs`. |
+| `` `<x>` is not a path in this repository I can use`` | The name was refused before cloning. `..`, absolute paths, `.git` and glob characters are not allowed. |
+| ``there is no `<x>` in this repository`` | The path does not exist on the default branch, or it is a symlink that points outside the repository. Paths are case-sensitive. |
+| `` `make` only knows `docs` for now`` | Use `make docs`. To change existing files elsewhere, use `update`. |
+| `commands are now action then target` | Write `@IMGAgent ask docs`, not `@IMGAgent docs ask`. |
+| ``I don't know `...` `` | The text starts with `@IMGAgent` followed by an unknown word. The reply lists the commands. |
+| `write your question after ...` / `write what to do after ...` | `ask` and `update` need text after the folders. |
 
-`signoff` and the signoff form need a `SIGNOFF.toml`. A maintainer creates it once with `aisignoff init`. See [preparing a repository](../getting-started/per-repository.md).
+### Folders that are too large
 
-## Still stuck
+`ask` and `update` read at most about 150,000 tokens of text. That is about 600,000 characters, and files over 200 kB are skipped. If the folders are larger, the reply is:
 
-1. Redeliver the latest delivery from *Recent Deliveries* and read the response text.
-2. Read the log around that time; every delivery is logged as `delivery <id> <event>.<action>: <result>`.
-3. Run the checks in [Operating IMGAgent](index.md) against your setup.
+> `src` is too large to read at once: about 210,000 tokens in 840 files, the limit is about 150,000. Name smaller folders.
+
+For `ask` this text is the answer. For `update` it appears as the first line of a "nothing needed to change" style reply. Name subfolders instead, for example `src/package` rather than `src`. See [ask](../usage/ask.md) and [update](../usage/update.md).
+
+### Nothing changed
+
+`make docs` and `update` reply without a pull request when no file in scope changed. `make docs` replies with ``@you `make docs`: ...``, and `update` replies with ``@you `update ...`: ...``. The rest of the reply is the first line of the summary. For `update`, only modifications of existing tracked files under the target folders or at the top level count. Files under `.github/workflows/` never count. Anything else the script changed is left out, and the log shows `leaving out changes outside its scope: ...`.
+
+## Problems inside the pull request
+
+Some problems do not stop the job. Instead, they are reported in the pull request description.
+
+- **The nav could not be updated.** If `make docs` cannot write a `zensical.toml` that reads back with the planned nav, it keeps the pages. The description then says **The nav in `zensical.toml` could not be updated** and gives the `nav = [...]` block to paste by hand. See [make docs](../usage/make-docs.md).
+- **Edits that could not be applied.** `update` makes find-and-replace edits. An edit whose text is not found exactly once is skipped, and the file's line in the description says `N edit(s) could not be applied (text not found exactly once), please check this file by hand.`
+- **Skipped files.** If the plan wanted to change a file that `update` may not touch, the description lists it as **skipped** together with what was wanted.
+- **The requester is not assigned.** If assigning fails, the pull request is still opened, and the log shows `could not assign <login>: ...`.
+
+## Signoff
+
+The signoff assistant and the signoff form report their own problems in the issue. The assistant asks for missing details, or lists the checks the answers failed. The form replies with **The request couldn't be turned into a pull request.** and a list of problems; editing the issue runs it again. If the repository has no `SIGNOFF.toml`, both say so: a maintainer creates it once with `aisignoff init`. If the assistant cannot reach Claude, it says so and suggests the form. See [signoff](../usage/signoff.md).
