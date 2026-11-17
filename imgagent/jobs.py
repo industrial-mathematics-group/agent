@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -31,9 +32,9 @@ FOOTER = "\n\n<sub>IMGAgent · {what}. An AI can be wrong.</sub>"
 class Config:
     handle: str = "IMGAgent"
     anthropic_api_key: str = ""
-    docs_ask_model: str = "claude-haiku-5-5"
-    docs_writer_model: str = "claude-opus-5-5"
-    docs_writer_effort: str = "medium"
+    ask_model: str = "claude-haiku-5-5"
+    writer_model: str = "claude-opus-5-5"
+    writer_effort: str = "medium"
     signoff_model: str = "claude-sonnet-5-5"
     signoff_model_name: str = "Claude Sonnet 5.5 (Anthropic)"
     signoff_effort: str = "medium"
@@ -45,9 +46,10 @@ class Config:
         return cls(
             handle=e("IMGAGENT_HANDLE") or d.handle,
             anthropic_api_key=e("ANTHROPIC_API_KEY", ""),
-            docs_ask_model=e("DOCS_ASK_MODEL") or d.docs_ask_model,
-            docs_writer_model=e("DOCS_WRITER_MODEL") or d.docs_writer_model,
-            docs_writer_effort=e("DOCS_WRITER_EFFORT") or d.docs_writer_effort,
+            # The DOCS_* names are the old ones, from when every command was about docs/.
+            ask_model=e("ASK_MODEL") or e("DOCS_ASK_MODEL") or d.ask_model,
+            writer_model=e("WRITER_MODEL") or e("DOCS_WRITER_MODEL") or d.writer_model,
+            writer_effort=e("WRITER_EFFORT") or e("DOCS_WRITER_EFFORT") or d.writer_effort,
             signoff_model=e("SIGNOFF_MODEL") or d.signoff_model,
             signoff_model_name=e("SIGNOFF_MODEL_NAME") or d.signoff_model_name,
             signoff_effort=e("SIGNOFF_EFFORT") or d.signoff_effort,
@@ -137,49 +139,85 @@ def _docs_env(ctx: Context, clone: Path) -> dict:
 # ------------------------------------------------------------------------------------------- help
 
 def help_text(handle: str) -> str:
-    return (f"Commands for @{handle} (people with write access):\n\n"
+    return (f"Commands for @{handle} (people with write access), as `@{handle} <action> <folders> [with <folders>]` "
+            f"and then the question, task or hint, on the same line or below. Folders are comma-separated "
+            f"(`docs,src`); the ones after `with` are only read.\n\n"
             f"| Command | What happens |\n|---|---|\n"
+            f"| `@{handle} ask docs,src` and a question | answers from the files in those folders |\n"
+            f"| `@{handle} update docs with src` and a task | edits existing files in `docs` and at the top level (no new files), reading `src`, as a pull request |\n"
+            f"| `@{handle} make docs [with src]` and a hint | rebuilds `docs/` from the code (or only from `src`), as a pull request |\n"
             f"| `@{handle} signoff` and your words | records how files were made and reviewed: a `SIGNOFF.toml` pull request |\n"
-            f"| `@{handle} docs ask` and a question | answers from the docs in `docs/` |\n"
-            f"| `@{handle} docs make [hint]` | rebuilds `docs/` from the code, as a pull request |\n"
-            f"| `@{handle} docs update [hint]` | fixes what is outdated in `docs/`, as a pull request |\n"
             f"| `@{handle} help` | this list |")
 
 
 def do_help(ctx: Context, job: Job) -> None:
     if not ctx.can_write(ctx.actor):
         return   # no reply: "@IMGAgent" in any comment by anyone shouldn't make the bot talk
-    lead = f"I don't know `{job.args['unknown']}`. " if job.args.get("unknown") else ""
+    lead = f"{job.args['problem']}\n\n" if job.args.get("problem") else ""
     ctx.say(f"@{ctx.actor} {lead}{help_text(ctx.cfg.handle)}")
 
 
-# --------------------------------------------------------------------------------------- docs ask
+def missing(clone: Path, paths: list[str]) -> list[str]:
+    """The paths that don't exist in the clone or lead outside it."""
+    return [p for p in paths if find_target(clone, p) is None]
 
-def do_docs_ask(ctx: Context, job: Job) -> None:
+
+def find_target(clone: Path, target: str) -> Path | None:
+    """The target inside the clone, or None when it doesn't exist or points outside it (a symlink)."""
+    root = clone.resolve()
+    path = (clone / target)
+    if not path.exists() or not path.resolve().is_relative_to(root):
+        return None
+    return path
+
+
+def in_scope(rel: str, targets: list[str]) -> bool:
+    """May `update <targets>` change this file: under a target or at the top level, never a workflow."""
+    if rel.startswith(".github/workflows/"):
+        return False
+    return "/" not in rel or any(rel == t or rel.startswith(t + "/") for t in targets)
+
+
+def spec(job: Job) -> str:
+    """"docs,src with tests" for messages."""
+    text = ",".join(job.args["targets"])
+    return text + (f" with {','.join(job.args['context'])}" if job.args.get("context") else "")
+
+
+def no_such(ctx: Context, gone: list[str], usage: str) -> None:
+    names = ", ".join(f"`{p}`" for p in gone)
+    ctx.say(f"@{ctx.actor} there is no {names} in this repository. Write `@{ctx.cfg.handle} {usage}`.")
+
+
+# -------------------------------------------------------------------------------------------- ask
+
+def do_ask(ctx: Context, job: Job) -> None:
+    paths = job.args["targets"] + job.args.get("context", [])
+    command = f"@{ctx.cfg.handle} ask {spec(job)}"
     if not ctx.can_write(ctx.actor):
-        return ctx.refuse(f"@{ctx.cfg.handle} docs ask")
+        return ctx.refuse(command)
     question = job.args.get("question", "").strip()
     if not question:
-        ctx.say(f"@{ctx.actor} write your question after `@{ctx.cfg.handle} docs ask`.")
+        ctx.say(f"@{ctx.actor} write your question after `{command}`.")
         return
     ctx.react()
     with tempfile.TemporaryDirectory(prefix="imgagent-") as tmp:
         clone = Path(tmp) / "repo"
-        github.clone(ctx.repo, ctx.token(), clone, depth=1, sparse=["/docs/", "/.github/imgagent.toml"])
-        if not (clone / "docs").is_dir():
-            ctx.say(f"@{ctx.actor} this repository has no `docs/` folder to answer from.")
-            return
+        github.clone(ctx.repo, ctx.token(), clone, depth=1,
+                     sparse=[f"/{p}" for p in paths] + ["/.github/imgagent.toml"])
+        if gone := missing(clone, paths):
+            return no_such(ctx, gone, "ask <folders>` and your question, e.g. `ask docs,src")
         answer = Path(tmp) / "answer.md"
-        env = {**_docs_env(ctx, clone), "QUESTION": question, "ANSWER_FILE": str(answer),
-               "DOCS_BOT_MODEL": ctx.cfg.docs_ask_model}
-        r = _run([sys.executable, str(SCRIPTS / "docs" / "ask.py")], clone, env, timeout=300)
+        env = {**_docs_env(ctx, clone), "TARGETS": ",".join(paths), "QUESTION": question, "ANSWER_FILE": str(answer),
+               "ASK_MODEL": ctx.cfg.ask_model}
+        r = _run([sys.executable, str(SCRIPTS / "repo" / "ask.py")], clone, env, timeout=300)
         if r.returncode or not answer.is_file():
             raise RuntimeError("ask.py failed")
         ctx.say(answer.read_text(encoding="utf-8").strip()
-                + FOOTER.format(what=f"answered with {ctx.cfg.docs_ask_model} from the docs in this repository"))
+                + FOOTER.format(what=f"answered with {ctx.cfg.ask_model} from {', '.join(f'`{p}`' for p in paths)} in this repository"))
 
 
-# ------------------------------------------------------------------------------------ docs writer
+# ------------------------------------------------------------------------------ make and update
 
 def _family(model: str) -> str:
     for name in ("opus", "sonnet", "fable"):
@@ -188,7 +226,7 @@ def _family(model: str) -> str:
     return "Other"
 
 
-def docs_pr_body(actor: str, comment_url: str, command_text: str, summary: str, model: str) -> str:
+def pr_body(actor: str, comment_url: str, command_text: str, summary: str, model: str, review: str) -> str:
     """The organisation's PR template, filled in for PR-signoff: G3 and the model, A0; the requester ticks H."""
     fam = _family(model)
     box = lambda f: "x" if fam == f else " "
@@ -198,7 +236,7 @@ Requested by @{actor} in {comment_url} (`{command_text}`).
 
 {summary.strip()}
 
-Review every page before merging: Claude was told to document only what the code shows, but it can still be wrong.
+{review}
 
 ## AI declaration
 
@@ -237,52 +275,112 @@ AI-Review-Findings:
 """
 
 
-def do_docs_write(ctx: Context, job: Job) -> None:
+def _run_writer(ctx: Context, clone: Path, tmp: Path, script: Path, args: list[str], extra: dict) -> str:
+    """Run a script that edits the clone and writes a summary; return the summary."""
+    summary_file = tmp / "summary.md"
+    env = {**_docs_env(ctx, clone), "WRITER_MODEL": ctx.cfg.writer_model, "WRITER_EFFORT": ctx.cfg.writer_effort,
+           "SUMMARY_FILE": str(summary_file), **extra}
+    r = _run([sys.executable, str(script), *args], clone, env, timeout=45 * 60)
+    if r.returncode or not summary_file.is_file():
+        raise RuntimeError(f"{script.name} failed")
+    return summary_file.read_text(encoding="utf-8")
+
+
+def _open_pr(ctx: Context, clone: Path, paths: list[str], *, slug: str, bot_id: int, branch: str, title: str,
+             command_text: str, summary: str, review: str) -> None:
+    """Commit `paths` on a new branch, push it, open the pull request and assign the requester."""
+    git = lambda *a: subprocess.run(["git", "-C", str(clone), *a], check=True, capture_output=True, text=True)
+    model = ctx.cfg.writer_model
+    bot = f"{slug}[bot]"
+    comment_url = ctx.comment["html_url"]
+    git("switch", "-c", branch)
+    git("add", "-A", "--", *paths)
+    git("-c", f"user.name={bot}", "-c", f"user.email={bot_id}+{bot}@users.noreply.github.com",
+        "commit", "-q", "-m", title,
+        "-m", f"Written by {model} on {ctx.default_branch}, requested by @{ctx.actor} in {comment_url}")
+    github.set_token(clone, ctx.repo, ctx.token(fresh=True))   # the first token may be close to expiry
+    git("push", "-q", "origin", branch)
+
+    pr = ctx.api("POST", f"/repos/{ctx.repo}/pulls", {
+        "title": title, "head": branch, "base": ctx.default_branch,
+        "body": pr_body(ctx.actor, comment_url, command_text, summary, model, review)})
+    try:
+        ctx.api("POST", f"/repos/{ctx.repo}/issues/{pr['number']}/assignees", {"assignees": [ctx.actor]})
+    except github.GitHubError as e:
+        log.warning("could not assign %s: %s", ctx.actor, e)
+    ctx.say(f"@{ctx.actor} `{command_text.split(' ', 1)[1]}` is ready for review: {pr['html_url']}")
+
+
+def _first_line(summary: str, fallback: str) -> str:
+    return summary.strip().splitlines()[0] if summary.strip() else fallback
+
+
+def do_make(ctx: Context, job: Job) -> None:
+    hint, context = job.args.get("hint", ""), job.args.get("context", [])
+    command_text = f"@{ctx.cfg.handle} make {spec(job)}"
     if not ctx.can_write(ctx.actor):
-        return ctx.refuse(f"@{ctx.cfg.handle} docs {job.args['command']}")
-    command, hint = job.args["command"], job.args.get("hint", "")
-    command_text = f"@{ctx.cfg.handle} docs {command}"
+        return ctx.refuse(command_text)
     ctx.react()
-    model = ctx.cfg.docs_writer_model
     # Who commits, before the long Claude run: a problem here should cost seconds, not the written pages.
     slug, bot_id = ctx.app.identity(ctx.token())
     with tempfile.TemporaryDirectory(prefix="imgagent-") as tmp:
-        clone = Path(tmp) / "repo"
+        tmp = Path(tmp)
+        clone = tmp / "repo"
         github.clone(ctx.repo, ctx.token(), clone, ref=ctx.default_branch)
-        summary_file = Path(tmp) / "summary.md"
-        env = {**_docs_env(ctx, clone), "DOCS_WRITER_MODEL": model,
-               "DOCS_WRITER_EFFORT": ctx.cfg.docs_writer_effort, "SUMMARY_FILE": str(summary_file)}
-        r = _run([sys.executable, str(SCRIPTS / "docs" / "write_docs.py"), command, hint], clone, env,
-                 timeout=45 * 60)
-        if r.returncode or not summary_file.is_file():
-            raise RuntimeError("write_docs.py failed")
-        summary = summary_file.read_text(encoding="utf-8")
-
-        git = lambda *a: subprocess.run(["git", "-C", str(clone), *a], check=True, capture_output=True,
-                                        text=True)
-        if not git("status", "--porcelain", "--", "docs", "zensical.toml").stdout.strip():
-            ctx.say(f"@{ctx.actor} `docs {command}`: {summary.splitlines()[0] if summary else 'nothing to change.'}")
+        if gone := missing(clone, context):
+            return no_such(ctx, gone, "make docs with <folders>")
+        summary = _run_writer(ctx, clone, tmp, SCRIPTS / "docs" / "write_docs.py", ["make", hint],
+                              {"CONTEXT": ",".join(context)})
+        paths = ["docs", "zensical.toml"]
+        status = subprocess.run(["git", "-C", str(clone), "status", "--porcelain", "--", *paths],
+                                check=True, capture_output=True, text=True).stdout
+        if not status.strip():
+            ctx.say(f"@{ctx.actor} `make docs`: {_first_line(summary, 'nothing to change.')}")
             return
-        bot = f"{slug}[bot]"
-        branch = f"{slug}/docs-{command}-{secrets.token_hex(4)}"
-        comment_url = ctx.comment["html_url"]
-        git("switch", "-c", branch)
-        git("add", "-A", "--", "docs", "zensical.toml")
-        git("-c", f"user.name={bot}", "-c", f"user.email={bot_id}+{bot}@users.noreply.github.com",
-            "commit", "-q", "-m", f"docs: {command} documentation from the code",
-            "-m", f"Written by {model} from the code on {ctx.default_branch}, requested by @{ctx.actor} "
-                  f"in {comment_url}")
-        github.set_token(clone, ctx.repo, ctx.token(fresh=True))   # the first token may be close to expiry
-        git("push", "-q", "origin", branch)
+        _open_pr(ctx, clone, paths, slug=slug, bot_id=bot_id, branch=f"{slug}/make-docs-{secrets.token_hex(4)}",
+                 title="docs: make documentation from the code", command_text=command_text, summary=summary,
+                 review="Review every page before merging: Claude was told to document only what the code "
+                        "shows, but it can still be wrong.")
 
-        pr = ctx.api("POST", f"/repos/{ctx.repo}/pulls", {
-            "title": f"docs: {command} documentation from the code", "head": branch,
-            "base": ctx.default_branch, "body": docs_pr_body(ctx.actor, comment_url, command_text, summary, model)})
-        try:
-            ctx.api("POST", f"/repos/{ctx.repo}/issues/{pr['number']}/assignees", {"assignees": [ctx.actor]})
-        except github.GitHubError as e:
-            log.warning("could not assign %s: %s", ctx.actor, e)
-        ctx.say(f"@{ctx.actor} `docs {command}` is ready for review: {pr['html_url']}")
+
+def do_update(ctx: Context, job: Job) -> None:
+    targets, context = job.args["targets"], job.args.get("context", [])
+    task = job.args.get("task", "").strip()
+    command_text = f"@{ctx.cfg.handle} update {spec(job)}"
+    if not ctx.can_write(ctx.actor):
+        return ctx.refuse(command_text)
+    if not task:
+        ctx.say(f"@{ctx.actor} write what to do after `{command_text}`, e.g. "
+                f"`{command_text} require Python 3.13`.")
+        return
+    ctx.react()
+    slug, bot_id = ctx.app.identity(ctx.token())
+    with tempfile.TemporaryDirectory(prefix="imgagent-") as tmp:
+        tmp = Path(tmp)
+        clone = tmp / "repo"
+        github.clone(ctx.repo, ctx.token(), clone, ref=ctx.default_branch)
+        if gone := missing(clone, targets + context):
+            return no_such(ctx, gone, "update <folders> [with <folders>]` and the task, e.g. `update docs with src")
+        summary = _run_writer(ctx, clone, tmp, SCRIPTS / "repo" / "update.py", [],
+                              {"TARGETS": ",".join(targets), "CONTEXT": ",".join(context), "TASK": task})
+        git = lambda *a: subprocess.run(["git", "-C", str(clone), *a], check=True, capture_output=True,
+                                        text=True).stdout
+        # Only edits of tracked files in scope get into the pull request: never new, deleted or other files.
+        changed = git("diff", "--name-only", "-z", "--diff-filter=M").split("\0")
+        paths = [p for p in changed if p and in_scope(p, targets)]
+        if stray := [p for p in git("diff", "--name-only", "-z").split("\0") if p and p not in paths]:
+            log.warning("update %s: leaving out changes outside its scope: %s", spec(job), stray)
+        if not paths:
+            ctx.say(f"@{ctx.actor} `update {spec(job)}`: {_first_line(summary, 'nothing needed to change.')}")
+            return
+        short = " ".join(task.split())
+        short = short if len(short) <= 60 else short[:57].rstrip() + "..."
+        name = re.sub(r"[^a-z0-9]+", "-", "-".join(targets).lower()).strip("-")[:40] or "repo"
+        _open_pr(ctx, clone, paths, slug=slug, bot_id=bot_id, branch=f"{slug}/update-{name}-{secrets.token_hex(4)}",
+                 title=f"{', '.join(targets)}: {short}", command_text=command_text,
+                 summary=f"Task: {task}\n\n{summary}",
+                 review=f"Claude could only edit existing files in {', '.join(f'`{t}`' for t in targets)} and at the top level of the "
+                        "repository. Review every change before merging: it can still be wrong.")
 
 
 # ---------------------------------------------------------------------------------------- signoff
@@ -354,7 +452,7 @@ def do_signoff(ctx: Context, job: Job) -> None:
                                "SIGNOFF_ASSISTANT_COMMAND": command})
 
 
-HANDLERS = {"help": do_help, "docs-ask": do_docs_ask, "docs-write": do_docs_write,
+HANDLERS = {"help": do_help, "ask": do_ask, "update": do_update, "make": do_make,
             "signoff": do_signoff, "signoff-form": do_signoff_form}
 
 

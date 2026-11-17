@@ -75,10 +75,10 @@ A delivery that is accepted but starts no job gets status `202`, and the respons
 
 ### The handle is there but no command is recognised
 
-- `docs ask`, `docs make`, `docs update` and `help` must be at the **start** of the comment, on the first line. `Thanks, @IMGAgent docs make` does nothing.
+- `ask`, `update`, `make` and `help` must be at the **start** of the comment, on the first line. `Thanks, @IMGAgent make docs` does nothing.
 - `signoff` can appear anywhere in the text, but only in an **open issue** (not a pull request, not a closed issue), and not in an issue made with the signoff form.
 - A mention inside a longer word, an e-mail address, a path or inline code (`` `@IMGAgent signoff` ``) is not a command.
-- `docs ask` is also recognised in the title or body of a new issue.
+- `ask` is also recognised in the title or body of a new issue.
 
 See [commands](../reference/commands.md) for the full rules.
 
@@ -108,17 +108,17 @@ After you change an App's permissions or events, each installation owner must ac
 
 The person who wrote the command has no write, maintain or admin permission on the repository. Only such people are answered. For `help`, nobody without write access gets a reply at all, so that a stray `@IMGAgent` in a comment does not make the bot talk. For the signoff assistant, the same restriction is stated in its own wording.
 
-### `this repository has no docs/ folder to answer from.`
+### `there is no <folder> in this repository.`
 
-`docs ask` reads `docs/`. Create it, or run `@IMGAgent docs make` first.
+Every folder you name, also after `with`, needs to exist on the default branch. Check the spelling (paths are case sensitive), or run `@IMGAgent make docs` first for `docs`.
 
 ### `IMGAgent couldn't finish this (<kind>). A maintainer can find the details in the IMGAgent server log.`
 
-A job raised an error, for example a failed clone, a failed script, a Claude API error or a refused push. The comment names only the kind of job (`docs-ask`, `docs-write`, `signoff`, `signoff-form`). Find the cause in the container log: look for the line `<kind> failed for <repo>#<number>` and the traceback after it. Output of the scripts is logged line by line with a `|` prefix. Set `LOG_LEVEL=DEBUG` if the default log is not enough.
+A job raised an error, for example a failed clone, a failed script, a Claude API error or a refused push. The comment names only the kind of job (`ask`, `update`, `make`, `signoff`, `signoff-form`). Find the cause in the container log: look for the line `<kind> failed for <repo>#<number>` and the traceback after it. Output of the scripts is logged line by line with a `|` prefix. Set `LOG_LEVEL=DEBUG` if the default log is not enough.
 
-### `docs make` or `docs update` made no pull request
+### `make docs` or `update` made no pull request
 
-If the repository's docs already match the code, the bot replies in a comment with the writer's one-line summary instead of opening a pull request. This is not an error.
+If nothing needed to change, the bot replies in a comment with the first line of the summary instead of opening a pull request. This is not an error. For `update`, the summary also says when Claude wanted a file it may not change, such as a new file or one outside the target.
 
 ### Signoff: `This repository has no SIGNOFF.toml yet`
 

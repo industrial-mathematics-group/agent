@@ -43,9 +43,9 @@ These choose the Claude models used by each kind of job. Each has a default, so 
 
 | Variable | Default | Used for |
 |---|---|---|
-| `DOCS_ASK_MODEL` | `claude-haiku-5-5` | `docs ask` answers. |
-| `DOCS_WRITER_MODEL` | `claude-opus-5-5` | `docs make` and `docs update`. |
-| `DOCS_WRITER_EFFORT` | `medium` | Effort level of the docs writer (`low`, `medium`, `high`, `xhigh` or `max`). |
+| `ASK_MODEL` | `claude-haiku-5-5` | `ask` answers. The old name `DOCS_ASK_MODEL` works too. |
+| `WRITER_MODEL` | `claude-opus-5-5` | `update` and `make docs`. The old name `DOCS_WRITER_MODEL` works too. |
+| `WRITER_EFFORT` | `medium` | Effort level of `update` and `make docs` (`low`, `medium`, `high`, `xhigh` or `max`). The old name `DOCS_WRITER_EFFORT` works too. |
 | `SIGNOFF_MODEL` | `claude-sonnet-5-5` | The signoff assistant that reads your words. |
 | `SIGNOFF_MODEL_NAME` | `Claude Sonnet 5.5 (Anthropic)` | The name written into the signoff comment and pull request as the assistant. |
 | `SIGNOFF_EFFORT` | `medium` | Effort level of the signoff assistant. |

@@ -2,7 +2,7 @@ name: Zensical docs
 
 # Builds the documentation site (docs/ + zensical.toml) with Zensical on every pull request that touches it,
 # and publishes it on GitHub Pages from the default branch: https://<owner>.github.io/<repo>/
-# One-time setup: Settings → Pages → Source: "GitHub Actions". No site yet? Write "@IMGAgent docs make" in an issue.
+# One-time setup: Settings → Pages → Source: "GitHub Actions". No site yet? Write "@IMGAgent make docs" in an issue.
 on:
   push:
     branches: ["main"]

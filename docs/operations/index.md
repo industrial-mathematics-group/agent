@@ -40,12 +40,12 @@ Jobs run on a pool of threads. `IMGAGENT_WORKERS` sets how many run at the same 
 
 Jobs with the same key run one after the other, even when workers are free:
 
-- `docs make` and `docs update` in the same repository share one key.
+- `make` and `update` in the same repository share one key.
 - Everything else is keyed by repository and issue number.
 
 ## Temporary clones
 
-Each job works in its own temporary directory with a fresh clone of the repository, and the directory is deleted when the job ends. `docs ask` uses a shallow, sparse clone of only `docs/` and `.github/imgagent.toml`. The other commands clone the repository fully.
+Each job works in its own temporary directory with a fresh clone of the repository, and the directory is deleted when the job ends. `ask` uses a shallow, sparse clone of only the folders it reads and `.github/imgagent.toml`. The other commands clone the repository fully.
 
 In the container, `/tmp` is a tmpfs of 2 GB and the root file system is read-only. See [Run the container](../getting-started/deploy.md).
 
@@ -63,8 +63,8 @@ Each script has a time limit. When it is exceeded, the job fails.
 
 | Job | Limit |
 |---|---|
-| `docs ask` | 5 minutes |
-| `docs make`, `docs update` | 45 minutes |
+| `ask` | 5 minutes |
+| `make`, `update` | 45 minutes |
 | `signoff` (the assistant, then the request script) | 10 minutes each |
 | signoff issue form | 10 minutes |
 
