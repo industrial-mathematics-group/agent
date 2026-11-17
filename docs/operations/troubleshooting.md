@@ -66,7 +66,7 @@ A delivery that is accepted but starts no job gets status `202`, and the respons
 | `ignored: owner <name> is not in IMGAGENT_ALLOWED_OWNERS` | The repository's owner is not in the allowlist. Add it to `IMGAGENT_ALLOWED_OWNERS` and restart. See [access control](../reference/allowed-owners.md). |
 | `ignored: <event> has no repository or installation` | The event is not tied to an installation, for example one sent from outside the App. Nothing to fix. |
 | `ignored: ... no @IMGAgent in '...'` | The comment or issue does not contain the handle. Check the spelling; the handle is set by `IMGAGENT_HANDLE`. |
-| `ignored: ... @IMGAgent found but no command ...`, `... only read when it is opened`, `... the edit didn't turn ...` | The handle is there but no command follows it, the issue event isn't `opened`, or an edit changed a command that had already run. See below. |
+| `ignored: ... @IMGAgent found but no command ...`, `... only read when it is opened, edited or reopened`, `... the edit didn't turn ...` | The handle is there but no command follows it, the issue event isn't `opened`, or an edit changed a command that had already run. See below. |
 | `ignored: sent by the bot <login>` | Bots are never answered. |
 | `ignored: IMGAgent doesn't use <event> events` | The App sends event types other than `issues` and `issue_comment`. Unsubscribe from them; they are harmless. |
 | `already handled` (status `200`) | The delivery id was seen before. Redelivering the same delivery does nothing; write a new comment instead. |
@@ -76,7 +76,7 @@ A delivery that is accepted but starts no job gets status `202`, and the respons
 ### The handle is there but no command is recognised
 
 - `ask`, `update`, `make` and `help` must follow `@IMGAgent` directly (`@IMGAgent ask docs`), on any line, but not inside code or a quoted line (`> ...`).
-- Commands in an issue are read when the issue is opened, not when it is edited later; write a comment instead.
+- Commands in an issue are read when the issue is opened. Editing or reopening the issue runs its command only while IMGAgent has not commented on it yet (the log says `not run, IMGAgent already commented on this issue` otherwise); write a comment instead.
 - Editing a comment runs its command only if it had no command that ran before.
 - `signoff` can appear anywhere in the text, but only in an **open issue** (not a pull request, not a closed issue), and not in an issue made with the signoff form.
 - A mention inside a longer word, an e-mail address, a path or inline code (`` `@IMGAgent signoff` ``) is not a command.

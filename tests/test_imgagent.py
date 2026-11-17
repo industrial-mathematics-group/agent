@@ -393,3 +393,39 @@ def test_update_from_a_new_issue_links_the_issue(monkeypatch, tmp_path):
     jobs.do_update(ctx, commands.Job("update", T(["src"], task="bump")))
     pr = next(b for m, p, b in calls if p.endswith("/pulls"))
     assert "in https://github.com/o/r/issues/3" in pr["body"]
+
+
+def test_editing_or_reopening_an_issue_runs_its_command_if_still_unanswered():
+    body = "@IMGAgent ask src How exactly is the grid moved?"
+    j = commands.route("issues", issue_event("edited", body=body, changes={"body": {"from": body}}), C)
+    assert j.kind == "ask" and j.args["unanswered_only"] and j.args["targets"] == ["src"]
+    assert commands.route("issues", issue_event("edited", body=body, changes={"title": {"from": "x"}}), C).kind == "ask"
+    assert commands.route("issues", issue_event("reopened", body=body), C).kind == "ask"
+    assert commands.route("issues", issue_event("edited", body=body, changes={}), C) is None    # e.g. labels
+    assert commands.route("issues", issue_event("edited", body="no command", changes={"body": {}}), C) is None
+    closed = issue_event("edited", body=body, changes={"body": {}})
+    closed["issue"]["state"] = "closed"
+    assert commands.route("issues", closed, C) is None
+    assert "unanswered_only" not in commands.route("issues", issue_event("opened", body=body), C).args
+
+
+@pytest.mark.parametrize("comments,runs", [
+    ([], True),
+    ([{"user": {"login": "pascal"}}], True),
+    ([{"user": {"login": "imgagent[bot]"}}], False),
+])
+def test_unanswered_only_checks_for_a_bot_comment(monkeypatch, tmp_path, comments, runs):
+    ran = []
+    ctx = jobs.Context(FakeApp(), jobs.Config(), "issues", full(issue_event("edited", body="@IMGAgent ask src x")))
+    seen = []
+
+    def api(method, path, body=None, ok404=False):
+        seen.append(path)
+        return comments
+    monkeypatch.setattr(ctx, "api", api)
+    monkeypatch.setitem(jobs.HANDLERS, "ask", lambda ctx, job: ran.append(job))
+    jobs.run(ctx, commands.Job("ask", {**T(["src"], question="x"), "unanswered_only": True}))
+    assert bool(ran) == runs and seen == ["/repos/industrial-mathematics-group/agent-sandbox/issues/3/comments?per_page=100"]
+    ran.clear()
+    jobs.run(ctx, commands.Job("ask", T(["src"], question="x")))   # a new comment always runs
+    assert ran

@@ -89,6 +89,12 @@ class Context:
             self.api("POST", f"/repos/{self.repo}/issues/comments/{self.comment['id']}/reactions",
                      {"content": content})
 
+    def answered(self) -> bool:
+        """Has IMGAgent commented on this issue already (the first 100 comments)?"""
+        slug, _ = self.app.identity(self.token())
+        comments = self.api("GET", f"/repos/{self.repo}/issues/{self.number}/comments?per_page=100") or []
+        return any((c.get("user") or {}).get("login") == f"{slug}[bot]" for c in comments)
+
     def can_write(self, login: str) -> bool:
         p = self.api("GET", f"/repos/{self.repo}/collaborators/{login}/permission", ok404=True)
         permission = (p or {}).get("permission", "none")
@@ -458,7 +464,11 @@ HANDLERS = {"help": do_help, "ask": do_ask, "update": do_update, "make": do_make
 
 def run(ctx: Context, job: Job) -> None:
     log.info("%s %s#%s by %s: %s %s", ctx.event, ctx.repo, ctx.number, ctx.actor, job.kind,
-             {k: v[:80] for k, v in job.args.items()})
+             {k: str(v)[:80] for k, v in job.args.items()})
+    if job.args.get("unanswered_only") and ctx.answered():
+        log.info("%s for %s#%s: not run, IMGAgent already commented on this issue (write a new comment instead)",
+                 job.kind, ctx.repo, ctx.number)
+        return
     try:
         HANDLERS[job.kind](ctx, job)
         log.info("%s for %s#%s finished", job.kind, ctx.repo, ctx.number)

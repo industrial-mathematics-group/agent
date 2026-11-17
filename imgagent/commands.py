@@ -184,6 +184,15 @@ def route(event: str, payload: dict, handle: str = "IMGAgent", signoff_form: boo
                 return job
             if signoff.search(normalise(issue_body)):
                 return Job("signoff")
+        if action in ("edited", "reopened") and not is_form and issue.get("state") == "open":
+            # The command in an issue that was opened before IMGAgent ran, or whose first try failed, runs when the
+            # issue is edited or reopened, but only while IMGAgent hasn't commented on it yet (checked in the job).
+            changed = set(payload.get("changes") or {})
+            if action == "reopened" or changed & {"title", "body"}:
+                job = find_command(f"{title}\n\n{issue_body}", handle)
+                if job and job.kind != "help":
+                    job.args["unanswered_only"] = True
+                    return job
         if signoff_form and is_form and issue.get("state") == "open" and action in ("opened", "edited", "reopened"):
             if action != "edited" or "body" in (payload.get("changes") or {}):
                 return Job("signoff-form")
