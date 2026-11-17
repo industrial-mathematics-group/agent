@@ -33,6 +33,8 @@ A comment that starts with `@IMGAgent` but has no command after it gets the list
 
 Editing a comment runs its command only if the comment had no command that ran before, for example when you fix a typo in `@IMGAgent aks docs`. Editing a command that already ran does nothing; write a new comment instead.
 
+A command in an issue runs when the issue is opened. If IMGAgent has not commented on the issue yet, for example because the issue was opened before IMGAgent was installed or the first try failed, editing the issue's title or body or reopening it runs the command. Once IMGAgent has commented, edits do nothing; write a comment instead.
+
 ## Folders, `with` and the text
 
 ```text

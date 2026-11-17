@@ -49,7 +49,9 @@ def describe(event: str, payload: dict, handle: str) -> str:
     action = payload.get("action")
     where = f"{event}.{action} by {sender.get('login')}: @{handle} found"
     if event == "issues" and action not in ("opened", "edited", "reopened"):
-        return f"{where}, but commands in an issue are only read when it is opened"
+        return f"{where}, but commands in an issue are only read when it is opened, edited or reopened"
+    if event == "issues" and action == "edited":
+        return f"{where}, but neither title nor body changed, or there is no command in them, in {start!r}"
     if action == "edited":
         return f"{where}, but the edit didn't turn a comment without a command into one in {start!r}"
     if action not in ("created", "opened"):
