@@ -288,9 +288,9 @@ def signoff_template(actor: str, handle: str, *, reviewer: str, branch: str) -> 
     body += ["**More** (optional)", "",
              text_field("exclude", "Files that need no declaration", "", "comma-separated globs, e.g. `reviews/**`"),
              box("policy-all", "Every file needs at least human review `H1`", False),
-             box("policy-g3", "G3 files need at least human review `H2` and AI review `A1`", False), ""]
-    body += choices("recheck", "AI review findings that need a new review, from", [
-        (s, s) for s in ("trivial", "minor", "major", "critical")], "major")
+             box("policy-g3", "G3 files need at least human review `H2` and AI review `A1`", False),
+             text_field("review-dir", "AI review folder", "reviews",
+                        "where AI reviews are recorded; it needs no declaration; empty for none")]
     return frame("aisignoff", actor, "", body, handle)
 
 
@@ -317,9 +317,9 @@ def signoff_toml(form: Form) -> str:
         policy.append(f"G3 = {{ human = {_string(human.upper())}, ai = {_string(ai.upper())} }}")
     if policy:
         lines += ["", "[policy]", *policy]
-    recheck = form.choice("recheck", "AI review findings")
-    if recheck != model.RECHECK:
-        lines += ["", "[review]", f"recheck = {_string(recheck)}"]
+    review_dir = form.text("review-dir").strip().removeprefix("./").strip("/")
+    if review_dir != aiconfig.REVIEW_DIR:
+        lines += ["", "[review]", f"dir = {_string(review_dir)}"]
     lines += ["", "[[annotations]]",
               f"path = {_string(paths[0]) if len(paths) == 1 else '[' + ', '.join(_string(p) for p in paths) + ']'}"]
     for key, value in values.items():
@@ -335,6 +335,8 @@ def signoff_toml(form: Form) -> str:
         cfg = aiconfig.load_text(out, PurePosixPath(aiconfig.FILENAME))
     except (aiconfig.ConfigError, ValueError) as e:
         raise SetupError(f"aisignoff can't read the result: {e}") from None
+    if cfg.warnings:
+        raise SetupError("aisignoff warns about the result: " + "; ".join(cfg.warnings))
     problems = model.validate(cfg.annotations[0].declaration(), cfg.policy, allow_todo=True)
     if problems:
         raise SetupError("the default declaration doesn't fit together: " + "; ".join(problems) + ".")

@@ -40,7 +40,7 @@ The template asks for:
 
 - **Default declaration**: the paths (`**`, every file), `Reviewed-by` (your GitHub name), `Assisted-by`, `AI-Reviewed-by`, and the levels: G0, H2 and A0 by default, or TODO for a person to fill in later.
 - **History**: `[history]` is on, with the repository's default branch, the merge method (merge, squash or rebase) and what commits that declare nothing mean.
-- **More**: files that need no declaration (`exclude`), the minimum review levels (`[policy]`), and from which severity AI review findings need a new review (`[review] recheck`, default `major`).
+- **More**: files that need no declaration (`exclude`), the minimum review levels (`[policy]`), and the folder where AI reviews are recorded (`[review] dir`, default `reviews`; empty for none).
 
 The result is checked with aisignoff before the pull request: the file must be readable, and the default declaration must fit together (for example, G1 to G3 need `Assisted-by`). Once `SIGNOFF.toml` is merged, [signoff](signoff.md) and the signoff form work in the repository.
 

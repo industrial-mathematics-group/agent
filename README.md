@@ -44,7 +44,7 @@ form. No model is involved, so the pull requests are declared G0. An existing fi
 | Command | Template | Pull request |
 |---|---|---|
 | `setup reuse` | copyright, the common licenses as boxes (the repository's license ticked for `.`), each with the folders it is for, and two free lines for other licenses | `REUSE.toml`, and the license texts in `LICENSES/` from the SPDX license list |
-| `setup aisignoff` | the default declaration (paths, levels, names), `[history]` (on, default branch, merge method), exclusions, policy, recheck | `SIGNOFF.toml`, checked with aisignoff |
+| `setup aisignoff` | the default declaration (paths, levels, names), `[history]` (on, default branch, merge method), exclusions, policy, AI review folder | `SIGNOFF.toml`, checked with aisignoff |
 | `setup citation` | title, message, type, authors with ORCID, version, date, license, repository, DOI, abstract, keywords (from the repository) | `CITATION.cff` |
 | `setup docs` | site name, description, address | `zensical.toml` as `make docs` writes it, with the nav of the pages in `docs/` (and a `docs/index.md` if missing) |
 
