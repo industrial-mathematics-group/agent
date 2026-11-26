@@ -9,6 +9,9 @@ or a comment, GitHub sends the event to this server, and IMGAgent answers as `im
 | `@IMGAgent ask <folders> [with <folders>]` and a question | anywhere in a comment or a new issue | Claude answers from the files in those folders, e.g. `ask docs` or `ask docs,src` |
 | `@IMGAgent update <folders> [with <folders>]` and a task | anywhere in a comment or a new issue | Claude carries out a small task by editing existing files in the folders and at the top level, reading the `with` folders; IMGAgent opens a pull request |
 | `@IMGAgent make docs [with <folders>]` and a hint | anywhere in a comment or a new issue | Claude rebuilds `docs/` from the code (or only from the `with` folders); IMGAgent opens a pull request |
+| `@IMGAgent setup reuse` and the annotations | anywhere in a comment or a new issue | IMGAgent writes `REUSE.toml` from `path:`, `copyright:` and `license:` lines and opens a pull request, without AI |
+| `@IMGAgent setup aisignoff` [and `G2 H1 A0`, `reviewed-by: ...`] | anywhere in a comment or a new issue | IMGAgent runs `aisignoff init` and opens a `SIGNOFF.toml` pull request, without AI |
+| `@IMGAgent setup docs` [and `name:`, `description:`, `url:`] | anywhere in a comment or a new issue | IMGAgent writes `zensical.toml` (as `make docs` would) for the pages in `docs/` and opens a pull request, without AI |
 | `@IMGAgent help` | anywhere in a comment or a new issue | the list of commands |
 | the issue form *Signoff: declare or attest files* | new or edited issue | IMGAgent opens the `SIGNOFF.toml` pull request, without AI (`IMGAGENT_SIGNOFF_FORM`) |
 
@@ -33,6 +36,28 @@ the docs still describe the old commands; bring them in line with the code
 | `update docs with src` | `docs`, the top-level files and `src` | existing files in `docs` and at the top level |
 | `make docs` | all the code | `docs/` and `zensical.toml`, creating and removing pages |
 | `make docs with src` | `src` and the top-level files | the same |
+
+`setup <reuse|aisignoff|docs>` creates one configuration file from the settings written below it, as
+`key: value` lines, and refuses when the file already exists (change it with `update` instead):
+
+```
+@IMGAgent setup reuse
+path: **
+copyright: 2026 Industrial Mathematics Group
+license: MIT
+
+path: docs/**
+license: CC-BY-4.0
+```
+
+| Command | Settings | Creates |
+|---|---|---|
+| `setup reuse` | one annotation per group of lines: `path` (comma-separated globs, default `**` for the first), `copyright` and `license` (repeatable, an SPDX expression), `precedence`; or a whole `REUSE.toml` in a code block | `REUSE.toml`; the pull request lists the licenses `LICENSES/` still lacks |
+| `setup aisignoff` | none for the commented template, or the three levels (`G2 H1 A0`, or `generation:`, `human:`, `ai:`) with `reviewed-by`, `assisted-by`, `ai-reviewed-by` | `SIGNOFF.toml`, by `aisignoff init` |
+| `setup docs` | optional `name`, `description`, `url` (`none` for no `site_url`) | `zensical.toml` with the nav of the pages in `docs/`, and `docs/index.md` if missing |
+
+Unknown settings are refused, so a typo never silently leaves something out. No model is involved, so the pull
+requests are declared G0.
 
 `update` never creates, deletes or renames a file: it is for small tasks over several files, such as
 `update src` + "require Python 3.13" or `update docs with src` + "fix what is outdated". `make` creates files,
@@ -147,7 +172,7 @@ caller while `IMGAGENT_SIGNOFF_FORM=true`), so two bots don't answer the same th
 
 - `make docs` writes a Zensical site: `docs/` and `zensical.toml`. Without them, it creates both (a complete `zensical.toml` with theme, Markdown extensions and nav); an existing `zensical.toml` keeps everything but its `nav`.
   `ask` and `update` only need the folders you name.
-- `signoff` and the form need a `SIGNOFF.toml` (`aisignoff init`). The pull requests follow the organisation's
+- `signoff` and the form need a `SIGNOFF.toml` (`aisignoff init`, or `@IMGAgent setup aisignoff`). The pull requests follow the organisation's
   PR template, so *PR-signoff* checks them; as an App's pull requests, they start the repository's checks.
 - Optional `.github/imgagent.toml` on the default branch, to tell Claude more than the repository description:
 

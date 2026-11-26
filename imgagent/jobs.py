@@ -18,7 +18,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import github
+from . import github, setup
 from .commands import Job
 
 log = logging.getLogger(__name__)
@@ -152,6 +152,9 @@ def help_text(handle: str) -> str:
             f"| `@{handle} ask docs,src` and a question | answers from the files in those folders |\n"
             f"| `@{handle} update docs with src` and a task | edits existing files in `docs` and at the top level (no new files), reading `src`, as a pull request |\n"
             f"| `@{handle} make docs [with src]` and a hint | rebuilds `docs/` from the code (or only from `src`), as a pull request |\n"
+            f"| `@{handle} setup reuse` and `path:`, `copyright:`, `license:` lines | creates `REUSE.toml`, as a pull request (no AI) |\n"
+            f"| `@{handle} setup aisignoff` [and `G2 H1 A0`, `reviewed-by:` ...] | creates `SIGNOFF.toml` with `aisignoff init`, as a pull request (no AI) |\n"
+            f"| `@{handle} setup docs` [and `name:`, `description:`, `url:` lines] | creates `zensical.toml` for the pages in `docs/`, as a pull request (no AI) |\n"
             f"| `@{handle} signoff` and your words | records how files were made and reviewed: a `SIGNOFF.toml` pull request |\n"
             f"| `@{handle} help` | this list |")
 
@@ -232,10 +235,12 @@ def _family(model: str) -> str:
     return "Other"
 
 
-def pr_body(actor: str, comment_url: str, command_text: str, summary: str, model: str, review: str) -> str:
-    """The organisation's PR template, filled in for PR-signoff: G3 and the model, A0; the requester ticks H."""
-    fam = _family(model)
+def pr_body(actor: str, comment_url: str, command_text: str, summary: str, model: str | None, review: str) -> str:
+    """The organisation's PR template, filled in for PR-signoff: G3 and the model (G0 without one), A0;
+    the requester ticks H."""
+    fam = _family(model) if model else ""
     box = lambda f: "x" if fam == f else " "
+    g = lambda level: "x" if (level == "G3") == bool(model) else " "
     return f"""## What does this PR change?
 
 Requested by @{actor} in {comment_url} (`{command_text}`).
@@ -250,10 +255,10 @@ Requested by @{actor} in {comment_url} (`{command_text}`).
 Responsible person: @{actor}
 
 Generation (tick exactly one: the highest level of any substantial part):
-- [ ] **G0** Written by a human, without AI
+- [{g("G0")}] **G0** Written by a human, without AI
 - [ ] **G1** AI-assisted: a human wrote it, AI suggested or edited parts
 - [ ] **G2** AI-generated: AI wrote substantial parts, a human directed the work and edited the result
-- [x] **G3** AI-autonomous: an agent produced it largely end to end
+- [{g("G3")}] **G3** AI-autonomous: an agent produced it largely end to end
 
 AI models that wrote parts of it (G1-G3, tick all that apply):
 - [{box("Fable")}] **Claude Fable** (Anthropic)
@@ -293,17 +298,19 @@ def _run_writer(ctx: Context, clone: Path, tmp: Path, script: Path, args: list[s
 
 
 def _open_pr(ctx: Context, clone: Path, paths: list[str], *, slug: str, bot_id: int, branch: str, title: str,
-             command_text: str, summary: str, review: str) -> None:
-    """Commit `paths` on a new branch, push it, open the pull request and assign the requester."""
+             command_text: str, summary: str, review: str, ai: bool = True) -> None:
+    """Commit `paths` on a new branch, push it, open the pull request and assign the requester.
+    ai=False: IMGAgent wrote the files from the person's own settings, without a model (G0)."""
     git = lambda *a: subprocess.run(["git", "-C", str(clone), *a], check=True, capture_output=True, text=True)
-    model = ctx.cfg.writer_model
+    model = ctx.cfg.writer_model if ai else None
     bot = f"{slug}[bot]"
     comment_url = (ctx.comment or ctx.issue)["html_url"]   # a command in a new issue has no comment
     git("switch", "-c", branch)
     git("add", "-A", "--", *paths)
     git("-c", f"user.name={bot}", "-c", f"user.email={bot_id}+{bot}@users.noreply.github.com",
         "commit", "-q", "-m", title,
-        "-m", f"Written by {model} on {ctx.default_branch}, requested by @{ctx.actor} in {comment_url}")
+        "-m", f"Written by {model or 'IMGAgent from the settings in the request, without AI'} on "
+              f"{ctx.default_branch}, requested by @{ctx.actor} in {comment_url}")
     github.set_token(clone, ctx.repo, ctx.token(fresh=True))   # the first token may be close to expiry
     git("push", "-q", "origin", branch)
 
@@ -389,6 +396,76 @@ def do_update(ctx: Context, job: Job) -> None:
                         "repository. Review every change before merging: it can still be wrong.")
 
 
+# ------------------------------------------------------------------------------------------ setup
+
+SETUP_FILES = {"reuse": "REUSE.toml", "aisignoff": "SIGNOFF.toml", "docs": "zensical.toml"}
+
+
+def do_setup(ctx: Context, job: Job) -> None:
+    """Create REUSE.toml, SIGNOFF.toml or zensical.toml from the settings in the request; no AI."""
+    target, text = job.args["target"], job.args.get("text", "")
+    name = SETUP_FILES[target]
+    command_text = f"@{ctx.cfg.handle} setup {target}"
+    if not ctx.can_write(ctx.actor):
+        return ctx.refuse(command_text)
+    example = {"reuse": setup.REUSE_EXAMPLE, "aisignoff": setup.SIGNOFF_EXAMPLE}.get(target, "")
+    example = f"\n\nFor example:\n\n{example.format(handle=ctx.cfg.handle)}" if example else ""
+    try:   # read the settings before cloning: a typo costs a reply, not a clone
+        if target == "reuse":
+            if not text.strip():
+                return ctx.say(f"@{ctx.actor} write the annotations for `REUSE.toml` after `{command_text}`.{example}")
+            content, licences = setup.reuse_toml(text)
+        elif target == "aisignoff":
+            args = setup.aisignoff_args(text)
+        else:
+            settings = setup.docs_settings(text)
+    except setup.SetupError as e:
+        return ctx.say(f"@{ctx.actor} `{command_text}`: {e}{example}")
+    ctx.react()
+    slug, bot_id = ctx.app.identity(ctx.token())
+    with tempfile.TemporaryDirectory(prefix="imgagent-") as tmp:
+        tmp = Path(tmp)
+        clone = tmp / "repo"
+        github.clone(ctx.repo, ctx.token(), clone, ref=ctx.default_branch)
+        if (clone / name).exists() or (clone / name).is_symlink():
+            fix = f"To change it, use `@{ctx.cfg.handle} update {name}` and say what to change"
+            fix += "; `make docs` also rebuilds its nav." if target == "docs" else "."
+            return ctx.say(f"@{ctx.actor} this repository already has a `{name}`, so `setup {target}` leaves it "
+                           f"as it is. {fix}")
+        paths = [name]
+        if target == "reuse":
+            (clone / name).write_text(content, encoding="utf-8")
+            summary = [f"Creates `REUSE.toml` from the annotations in the request, written by IMGAgent without AI."]
+            if gone := [i for i in licences if not (clone / "LICENSES" / f"{i}.txt").exists()]:
+                summary.append(f"\n`LICENSES/` has no text yet for {', '.join(f'`{i}`' for i in gone)}: add it with "
+                               f"`pipx run reuse download {' '.join(gone)}` before `reuse lint` passes.")
+            review = "Check every path, copyright and license before merging."
+        elif target == "aisignoff":
+            r = _run(["aisignoff", "init", *args], clone, {}, timeout=120)
+            if r.returncode or not (clone / name).is_file():
+                said = (r.stdout + r.stderr).strip()[-1500:] or "no output"
+                return ctx.say(f"@{ctx.actor} `aisignoff init` refused these settings:\n\n```\n{said}\n```{example}")
+            summary = [f"Creates `SIGNOFF.toml` with `aisignoff init {' '.join(args)}`".rstrip() + ", run by IMGAgent without AI."]
+            if not args:
+                summary.append("\nIt is the commented template: add the `[[annotations]]` for this repository's "
+                               "files before `aisignoff lint` passes.")
+            review = "Check the levels and names before merging: they are what the repository declares."
+        else:
+            env = {**_docs_env(ctx, clone), "SUMMARY_FILE": str(tmp / "summary.md")}
+            env.pop("ANTHROPIC_API_KEY")
+            for key, var in (("name", "DOCS_PROJECT"), ("description", "DOCS_ABOUT"), ("url", "DOCS_URL")):
+                if key in settings:
+                    env[var] = "" if key == "url" and settings[key].lower() == "none" else settings[key]
+            r = _run([sys.executable, str(SCRIPTS / "docs" / "write_docs.py"), "setup"], clone, env, timeout=120)
+            if r.returncode or not (tmp / "summary.md").is_file():
+                raise RuntimeError("write_docs.py setup failed")
+            summary = [(tmp / "summary.md").read_text(encoding="utf-8")]
+            paths = ["docs", name]
+            review = "Check the site name, description, address and nav before merging."
+        _open_pr(ctx, clone, paths, slug=slug, bot_id=bot_id, branch=f"{slug}/setup-{target}-{secrets.token_hex(4)}",
+                 title=f"Set up {name}", command_text=command_text, summary="\n".join(summary), review=review, ai=False)
+
+
 # ---------------------------------------------------------------------------------------- signoff
 
 def _actions_env(ctx: Context, tmp: Path, token: str) -> dict:
@@ -458,7 +535,7 @@ def do_signoff(ctx: Context, job: Job) -> None:
                                "SIGNOFF_ASSISTANT_COMMAND": command})
 
 
-HANDLERS = {"help": do_help, "ask": do_ask, "update": do_update, "make": do_make,
+HANDLERS = {"help": do_help, "ask": do_ask, "update": do_update, "make": do_make, "setup": do_setup,
             "signoff": do_signoff, "signoff-form": do_signoff_form}
 
 

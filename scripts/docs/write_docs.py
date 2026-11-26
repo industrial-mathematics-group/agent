@@ -12,6 +12,9 @@ review with `git diff`). Without docs/ or zensical.toml, both are created:
     export ANTHROPIC_API_KEY=sk-ant-...
     python path/to/imgagent/scripts/docs/write_docs.py make ["optional hint for Claude"]
 
+`write_docs.py setup` (for `@IMGAgent setup docs`) only creates zensical.toml, without Claude: the same file
+`make` creates, with the nav of the pages already in docs/ and a docs/index.md if there is none.
+
 Environment:
     REPO_ROOT           the repository to document, default the current directory
     DOCS_PROJECT        the project's name, default the folder name of REPO_ROOT
@@ -448,11 +451,73 @@ def make(writer: DocsWriter, hint: str) -> list[str]:
     return summary
 
 
+# --- setup (no Claude) ----------------------------------------------------------------------
+
+def page_title(path: Path) -> str:
+    """The first "# " heading of a page, or a title made from its file name."""
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("# "):
+                return line[2:].strip().strip("#").strip() or path.stem
+    except (OSError, UnicodeDecodeError):
+        pass
+    name = path.parent.name if path.stem == "index" else path.stem
+    return name.replace("-", " ").replace("_", " ").capitalize()
+
+
+def nav_of_pages() -> list:
+    """A nav for the pages in docs/: top-level pages first (index.md leading), then one section per folder."""
+    pages = sorted(p.relative_to(DOCS_DIR).as_posix() for p in DOCS_DIR.rglob("*.md")) if DOCS_DIR.is_dir() else []
+    order = lambda rel: (rel.rsplit("/", 1)[-1] != "index.md", rel)
+    nav: list = [{page_title(DOCS_DIR / p): p} for p in sorted((p for p in pages if "/" not in p), key=order)]
+    folders: dict[str, list[str]] = {}
+    for p in pages:
+        if "/" in p:
+            folders.setdefault(p.split("/", 1)[0], []).append(p)
+    for folder, entries in folders.items():
+        entries.sort(key=lambda rel: (rel != f"{folder}/index.md", rel))
+        title = page_title(DOCS_DIR / entries[0]) if entries[0] == f"{folder}/index.md" else \
+            folder.replace("-", " ").replace("_", " ").capitalize()
+        nav.append({title: entries})
+    return nav
+
+
+def setup() -> list[str]:
+    """Create zensical.toml (and docs/index.md when missing); never touch an existing zensical.toml."""
+    if TOML_PATH.exists():
+        return ["`zensical.toml` already exists, so nothing was changed. `make docs` rebuilds the pages and its nav."]
+    summary = ["Set up the documentation site: `zensical.toml` with the site settings, theme, Markdown "
+               "extensions and nav, as `make docs` creates it."]
+    index = DOCS_DIR / "index.md"
+    if not index.exists():
+        index.parent.mkdir(parents=True, exist_ok=True)
+        lines = [f"# {PROJECT}", ""]
+        if ABOUT:
+            lines += [f"{ABOUT}.", ""]
+        lines += ["This page is a placeholder. Write the documentation in `docs/`, or ask "
+                  "`@IMGAgent make docs` to write it from the code.", ""]
+        index.write_text("\n".join(lines), encoding="utf-8")
+        summary.append("- Created `docs/index.md`, a placeholder home page.")
+    nav = nav_of_pages()
+    summary += ["- The nav lists the pages in `docs/`:", "", "```toml", format_nav(nav), "```"]
+    did = write_nav(nav)
+    print(did, file=sys.stderr)
+    summary += ["", "Preview it with `pip install zensical && zensical serve`."]
+    return summary
+
+
 # --- main ---------------------------------------------------------------------------------
 
 def main() -> None:
+    if len(sys.argv) >= 2 and sys.argv[1] == "setup":
+        text = "\n".join(setup()) + "\n"
+        if summary_file := os.environ.get("SUMMARY_FILE"):
+            Path(summary_file).write_text(text, encoding="utf-8")
+        else:
+            print(text)
+        return
     if len(sys.argv) < 2 or sys.argv[1] != "make":
-        sys.exit("usage: write_docs.py make [hint for Claude]")
+        sys.exit("usage: write_docs.py make [hint for Claude] | write_docs.py setup")
     hint = " ".join(sys.argv[2:]).strip()
 
     code = load_code()

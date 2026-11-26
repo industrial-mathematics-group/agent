@@ -22,6 +22,7 @@ nav = [
     "usage/ask.md",
     "usage/update.md",
     "usage/make-docs.md",
+    "usage/setup.md",
     "usage/signoff.md",
     "usage/pull-requests.md",
   ] },

@@ -6,6 +6,8 @@ Commands are "@IMGAgent <action> <paths> [with <paths>] [text]":
     update <paths> [with <paths>]    small edits to existing files under the first paths and the top-level
                                      files; the paths after "with" are read-only context
     make docs [with <paths>]         build the docs from the code (all of it, or only the "with" paths)
+    setup reuse|aisignoff|docs       create REUSE.toml, SIGNOFF.toml or zensical.toml from the text below
+                                     (no AI: the text is read as "key: value" lines, see imgagent/setup.py)
 
 <paths> is a comma-separated list. The question, task or hint follows on the same line or below.
     signoff ...               the signoff assistant (anywhere in the text, see signoff_pattern)
@@ -19,6 +21,7 @@ from dataclasses import dataclass, field
 
 FORM_MARKER = "### What should be recorded?"   # issues made with the form "Signoff: declare or attest files"
 MAKE_TARGETS = ("docs",)
+SETUP_TARGETS = ("reuse", "aisignoff", "docs")
 
 # A path inside the repository: plain names separated by "/", no "..", no ".git", no glob characters.
 _SEGMENT = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$|^\.[A-Za-z0-9_][A-Za-z0-9._-]*$")
@@ -26,12 +29,12 @@ _SEGMENT = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$|^\.[A-Za-z0-9_][A-Za-z0-9.
 
 @dataclass
 class Job:
-    kind: str                     # ask | update | make | signoff | signoff-form | help
+    kind: str                     # ask | update | make | setup | signoff | signoff-form | help
     args: dict = field(default_factory=dict)
 
     def key(self, repo: str, number: int) -> str:
         """Jobs with the same key run one after the other. Jobs that open pull requests share one per repository."""
-        return f"{repo}#write" if self.kind in ("make", "update") else f"{repo}#{number}"
+        return f"{repo}#write" if self.kind in ("make", "update", "setup") else f"{repo}#{number}"
 
 
 def clean_target(raw: str) -> str | None:
@@ -62,7 +65,7 @@ def signoff_pattern(handle: str) -> re.Pattern:
 _LIST = r"[^\s,]+(?:[ \t]*,[ \t]*[^\s,]+)*"
 _SPEC = r"[ \t]+(?P<targets>" + _LIST + r")(?:[ \t]+with[ \t]+(?P<context>" + _LIST + r"))?"
 USAGE = {"ask": "ask <folders> [with <folders>]", "update": "update <folders> [with <folders>]",
-         "make": "make docs [with <folders>]"}
+         "make": "make docs [with <folders>]", "setup": "setup reuse|aisignoff|docs"}
 
 
 def _paths(raw: str | None) -> tuple[list[str], str | None]:
@@ -82,7 +85,14 @@ def _paths(raw: str | None) -> tuple[list[str], str | None]:
 
 def action_job(action: str, targets_raw: str | None, context_raw: str | None, rest: str) -> Job:
     """The job for "<action> <targets> [with <context>]" and its text, or help explaining what is wrong."""
-    usage = f"`{USAGE[action]}`, then the {dict(ask='question', update='task', make='hint')[action]}"
+    usage = f"`{USAGE[action]}`, then the {dict(ask='question', update='task', make='hint', setup='settings')[action]}"
+    if action == "setup":
+        target = (targets_raw or "").strip().strip("`").lower()
+        if target not in SETUP_TARGETS or context_raw:
+            what = f"not `{targets_raw}`" if targets_raw else "and nothing else"
+            return Job("help", {"problem": f"`setup` knows `reuse` (REUSE.toml), `aisignoff` (SIGNOFF.toml) "
+                                           f"and `docs` (zensical.toml), {what}: {usage}."})
+        return Job("setup", {"target": target, "text": rest})
     if not targets_raw:
         return Job("help", {"problem": f"`{action}` needs a folder: {usage}."})
     targets, bad = _paths(targets_raw)
@@ -123,7 +133,7 @@ def find_command(text: str, handle: str) -> Job | None:
     text = normalise(text)
     search = _searchable(text)
     mention = r"(?<![\w@/`])\**@" + re.escape(handle) + r"(?:\[bot\])?(?![\w-])\**[:,]?"
-    m = re.search(mention + r"[ \t]+(?P<verb>ask|update|make|help)\b", search, re.I)
+    m = re.search(mention + r"[ \t]+(?P<verb>ask|update|make|setup|help)\b", search, re.I)
     if m:
         verb = m["verb"].lower()
         if verb == "help":

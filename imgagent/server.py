@@ -56,7 +56,7 @@ def describe(event: str, payload: dict, handle: str) -> str:
         return f"{where}, but the edit didn't turn a comment without a command into one in {start!r}"
     if action not in ("created", "opened"):
         return f"{where}, but {event}.{action} events are not read"
-    return (f"{where} but no command: write `@{handle} <ask|update|make|help> ...` (not in code or a quote); "
+    return (f"{where} but no command: write `@{handle} <ask|update|make|setup|help> ...` (not in code or a quote); "
             f"signoff only in open issues; in {start!r}")
 
 
