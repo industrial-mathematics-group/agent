@@ -131,6 +131,7 @@ def test_review_keeps_findings_in_the_reviewed_files(repo, monkeypatch):
     system = "".join(b["text"] for b in seen["system"])
     assert '<reviewed>\n<file path="src/a.py">' in system and '<context>\n<file path="docs/i.md">' in system
     assert result["findings"] == "major" and result["files"] == ["src/a.py", "src/sub/b.py"]
+    assert result["per_file"] == {"src/a.py": "minor", "src/sub/b.py": "major"}
     assert result["markdown"].splitlines()[2].startswith("- **major** `src/sub/b.py` (line 1): wrong")
     assert "context" not in result["markdown"]
     assert review.highest([]) == "none" and "No findings." in review.markdown("Fine.", [])

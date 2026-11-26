@@ -414,30 +414,71 @@ def do_update(ctx: Context, job: Job) -> None:
 FINDINGS_LEVEL = {"none": "F0", "trivial": "F0", "minor": "F1", "major": "F2", "critical": "F3"}
 
 
-def _record_review(ctx: Context, clone: Path, files: list[str], findings: str, reviewed_by: str) -> tuple[list[str], str]:
-    """Attest the reviewed files at A1 with aisignoff, as a new record file in the review folder.
-    The new files, and a note for the person (why nothing was recorded, or what aisignoff remarked)."""
+def _record_review(ctx: Context, clone: Path, per_file: dict[str, str], reviewed_by: str) -> tuple[list[str], str]:
+    """Attest each reviewed file at A1 with its own findings, with aisignoff, in one new record file of the review
+    folder. The new files, and a note for the person (why nothing was recorded, or what aisignoff remarked)."""
     if not (clone / "SIGNOFF.toml").is_file():
         return [], (f"This repository has no `SIGNOFF.toml`, so the review isn't recorded: "
                     f"`@{ctx.cfg.handle} setup aisignoff` sets it up.")
     try:
         from aisignoff.project import Project
-        declared = set(Project(clone).files())
+        project = Project(clone)
+        declared, folder = set(project.files()), project.config.review_dir
     except Exception as e:   # ConfigError, ProjectError: a SIGNOFF.toml aisignoff can't read
         return [], f"aisignoff can't read `SIGNOFF.toml`, so the review isn't recorded: {e}"
-    files = [f for f in files if f in declared]
-    if not files:
+    if not folder:
+        return [], '`SIGNOFF.toml` sets no review folder (`[review] dir = ""`), so the review isn\'t recorded.'
+    groups: dict[str, list[str]] = {}
+    for rel, level in per_file.items():
+        if rel in declared and level in FINDINGS_LEVEL:
+            groups.setdefault(level, []).append(rel)
+    if not groups:
         return [], "None of the reviewed files needs a declaration in `SIGNOFF.toml`, so there is nothing to record."
-    r = _run([sys.executable, "-m", "aisignoff", "--root", str(clone), "attest", "-a", "A1", "--findings", findings,
-              "--ai-reviewed-by", reviewed_by, "--", *files], clone, {}, timeout=300)
-    if r.returncode:
-        why = (r.stderr.strip().splitlines() or ["no reason given"])[-1]
-        return [], f"aisignoff couldn't record the review: {why}"
-    status = subprocess.run(["git", "-C", str(clone), "status", "--porcelain", "-z", "--untracked-files=all"],
-                            check=True, capture_output=True, text=True).stdout
-    new = [e[3:] for e in status.split("\0") if e.startswith("?? ")]
-    notes = [line.removeprefix("note: ") for line in r.stdout.splitlines() if line.startswith("note: ")]
-    return new, " ".join(n[0].upper() + n[1:] + "." for n in notes)
+    # aisignoff attest takes one --findings per call: one call per level, each into a part file, joined afterwards.
+    tag, parts, notes = secrets.token_hex(4), [], set()
+    for i, (level, files) in enumerate(groups.items()):
+        part = clone / folder / f"imgagent-{tag}-{i}.toml"
+        r = _run([sys.executable, "-m", "aisignoff", "--root", str(clone), "attest", "-a", "A1", "--findings", level,
+                  "--ai-reviewed-by", reviewed_by, "--to", str(part), "--", *files], clone, {}, timeout=300)
+        if r.returncode:
+            for p in parts:
+                p.unlink()
+            why = (r.stderr.strip().splitlines() or ["no reason given"])[-1]
+            return [], f"aisignoff couldn't record the review: {why}"
+        parts.append(part)
+        notes |= {line.removeprefix("note: ") for line in r.stdout.splitlines() if line.startswith("note: ")}
+    texts = [p.read_text(encoding="utf-8") for p in parts]
+    head = "".join(line for line in texts[0].splitlines(keepends=True) if line.startswith("#"))
+    body = "".join("".join(l for l in t.splitlines(keepends=True) if not l.startswith("#")) for t in texts)
+    for p in parts:
+        p.unlink()
+    import datetime
+    stem = f"{datetime.date.today().isoformat()}-review-" + (
+        re.sub(r"[^A-Za-z0-9._-]+", "-", "-".join(sorted({f.split('/')[0] for f in per_file})))[:40].strip("-") or "files")
+    target, n = clone / folder / f"{stem}.toml", 1
+    while target.exists():
+        n += 1
+        target = clone / folder / f"{stem}-{n}.toml"
+    target.write_text(head + body, encoding="utf-8")
+    try:
+        from aisignoff.config import load
+        load(clone)
+    except Exception as e:
+        target.unlink()
+        return [], f"aisignoff can't read the joined record, so the review isn't recorded: {e}"
+    return [target.relative_to(clone).as_posix()], " ".join(n[0].upper() + n[1:] + "." for n in sorted(notes))
+
+
+def _per_file_lines(per_file: dict[str, str]) -> str:
+    """"- **F2** (major): `a.md`" per findings level, highest first, for the comment and the pull request."""
+    order = ["critical", "major", "minor", "trivial", "none"]
+    out = []
+    for level in order:
+        files = [f"`{rel}`" for rel, lv in per_file.items() if lv == level]
+        if files:
+            shown = ", ".join(files[:20]) + (f" and {len(files) - 20} more" if len(files) > 20 else "")
+            out.append(f"- **{FINDINGS_LEVEL[level]}** ({level}): {shown}")
+    return "\n".join(out)
 
 
 def do_review(ctx: Context, job: Job) -> None:
@@ -467,29 +508,29 @@ def do_review(ctx: Context, job: Job) -> None:
         if findings not in FINDINGS_LEVEL:
             return ctx.say(f"@{ctx.actor} `review {spec(job)}`: {result.get('markdown', 'nothing to review.')}")
         reviewed_by = f"{name}, new session without the generating conversation, quick review requested in {comment_url}"
-        record, note = _record_review(ctx, clone, result.get("files", []), findings, reviewed_by)
+        per_file = result.get("per_file") or {f: findings for f in result.get("files", [])}
+        record, note = _record_review(ctx, clone, per_file, reviewed_by)
         url = None
         if record:
             sha = subprocess.run(["git", "-C", str(clone), "rev-parse", "--short", "HEAD"], check=True,
                                  capture_output=True, text=True).stdout.strip()
-            count = len(result.get("files", []))
             body = (f"## What does this PR change?\n\nRecords the quick AI review that @{ctx.actor} asked for in "
                     f"{comment_url} (`{command_text}`) as an aisignoff **A1** attestation of the files in "
                     f"{', '.join(f'`{t}`' for t in targets)} as of {sha}: {', '.join(f'`{p}`' for p in record)}.\n\n"
-                    f"Findings: **{findings}**, so once this is merged the lines of the {count} reviewed file(s) "
-                    f"show **{FINDINGS_LEVEL[findings]}** until they change.\n\n{result['markdown']}\n\n"
+                    f"Each file is attested with its own highest finding, so once this is merged their lines show, "
+                    f"until they change:\n\n{_per_file_lines(per_file)}\n\n{result['markdown']}\n\n"
                     f"{note}\n\nThis pull request only adds a record to the review folder, so it needs no AI "
                     f"declaration. Check that the findings above are fair before merging.").replace("\n\n\n\n", "\n\n")
             name_ = re.sub(r"[^a-z0-9]+", "-", "-".join(targets).lower()).strip("-")[:40] or "repo"
             url = _open_pr(ctx, clone, record, slug=slug, bot_id=bot_id, model=model, announce=False,
                            branch=f"{slug}/review-{name_}-{secrets.token_hex(4)}",
-                           title=f"Record a quick review of {', '.join(targets)} (A1, findings: {findings})",
+                           title=f"Record a quick review of {', '.join(targets)} (A1, highest finding: {findings})",
                            command_text=command_text, summary="", review="", body=body)
     lines = f"AI-Review: A1\nAI-Reviewed-by: {reviewed_by}\nAI-Review-Findings: {findings}"
     with_ = f", checked against {', '.join(f'`{c}`' for c in context)}" if context else ""
-    recorded = (f"Recorded as an A1 attestation in {url}: merging it marks the reviewed lines "
-                f"**{FINDINGS_LEVEL[findings]}**." if url else note)
-    ctx.say(f"@{ctx.actor} quick review of {', '.join(f'`{t}`' for t in targets)}{with_}: findings **{findings}**"
+    recorded = (f"Recorded as an A1 attestation of each file with its own findings in {url}; merging it marks "
+                f"their lines:\n\n{_per_file_lines(per_file)}" if url else note)
+    ctx.say(f"@{ctx.actor} quick review of {', '.join(f'`{t}`' for t in targets)}{with_}: highest finding **{findings}**"
             f"\n\n{result['markdown']}\n\n```\n{lines}\n```\n\n{recorded}"
             + FOOTER.format(what=f"reviewed with {model}, effort {ctx.cfg.review_effort}; a quick check, not a full review"))
 
