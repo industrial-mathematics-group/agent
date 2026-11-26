@@ -39,6 +39,9 @@ class Config:
     signoff_model: str = "claude-sonnet-5-5"
     signoff_model_name: str = "Claude Sonnet 5.5 (Anthropic)"
     signoff_effort: str = "medium"
+    review_model: str = "claude-sonnet-5-5"
+    review_model_name: str = "Claude Sonnet 5.5 (Anthropic)"
+    review_effort: str = "low"
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -54,6 +57,9 @@ class Config:
             signoff_model=e("SIGNOFF_MODEL") or d.signoff_model,
             signoff_model_name=e("SIGNOFF_MODEL_NAME") or d.signoff_model_name,
             signoff_effort=e("SIGNOFF_EFFORT") or d.signoff_effort,
+            review_model=e("REVIEW_MODEL") or d.review_model,
+            review_model_name=e("REVIEW_MODEL_NAME") or d.review_model_name,
+            review_effort=e("REVIEW_EFFORT") or d.review_effort,
         )
 
 
@@ -82,8 +88,8 @@ class Context:
     def api(self, method: str, path: str, body: dict | None = None, ok404: bool = False):
         return github.request(method, path, self.token(), body, ok404=ok404)
 
-    def say(self, text: str) -> None:
-        self.api("POST", f"/repos/{self.repo}/issues/{self.number}/comments", {"body": text})
+    def say(self, text: str) -> dict:
+        return self.api("POST", f"/repos/{self.repo}/issues/{self.number}/comments", {"body": text})
 
     def react(self, content: str = "eyes") -> None:
         if self.comment:
@@ -153,6 +159,7 @@ def help_text(handle: str) -> str:
             f"| `@{handle} ask docs,src` and a question | answers from the files in those folders |\n"
             f"| `@{handle} update docs with src` and a task | edits existing files in `docs` and at the top level (no new files), reading `src`, as a pull request |\n"
             f"| `@{handle} make docs [with src]` and a hint | rebuilds `docs/` from the code (or only from `src`), as a pull request |\n"
+            f"| `@{handle} review docs [with src]` and an optional focus | a quick AI review of `docs`, checked against `src`; recorded as an aisignoff A1 attestation in a pull request |\n"
             f"| `@{handle} setup reuse`, `aisignoff`, `citation` or `docs` | a template for `REUSE.toml` (and `LICENSES/`), `SIGNOFF.toml`, `CITATION.cff` or `zensical.toml` with defaults filled in; ticking its **Done** opens the pull request (no AI) |\n"
             f"| `@{handle} signoff` and your words | records how files were made and reviewed: a `SIGNOFF.toml` pull request |\n"
             f"| `@{handle} help` | this list |")
@@ -297,11 +304,14 @@ def _run_writer(ctx: Context, clone: Path, tmp: Path, script: Path, args: list[s
 
 
 def _open_pr(ctx: Context, clone: Path, paths: list[str], *, slug: str, bot_id: int, branch: str, title: str,
-             command_text: str, summary: str, review: str, ai: bool = True) -> str:
+             command_text: str, summary: str, review: str, ai: bool = True, model: str | None = None,
+             body: str | None = None, announce: bool = True) -> str:
     """Commit `paths` on a new branch, push it, open the pull request and assign the requester.
-    ai=False: IMGAgent wrote the files from the person's own settings, without a model (G0)."""
+    ai=False: IMGAgent wrote the files from the person's own settings, without a model (G0).
+    body: the whole description instead of the template (a review record needs no declaration);
+    announce=False: the caller says it is ready, in its own comment."""
     git = lambda *a: subprocess.run(["git", "-C", str(clone), *a], check=True, capture_output=True, text=True)
-    model = ctx.cfg.writer_model if ai else None
+    model = (model or ctx.cfg.writer_model) if ai else None
     bot = f"{slug}[bot]"
     comment_url = (ctx.comment or ctx.issue)["html_url"]   # a command in a new issue has no comment
     git("switch", "-c", branch)
@@ -315,12 +325,13 @@ def _open_pr(ctx: Context, clone: Path, paths: list[str], *, slug: str, bot_id: 
 
     pr = ctx.api("POST", f"/repos/{ctx.repo}/pulls", {
         "title": title, "head": branch, "base": ctx.default_branch,
-        "body": pr_body(ctx.actor, comment_url, command_text, summary, model, review)})
+        "body": body or pr_body(ctx.actor, comment_url, command_text, summary, model, review)})
     try:
         ctx.api("POST", f"/repos/{ctx.repo}/issues/{pr['number']}/assignees", {"assignees": [ctx.actor]})
     except github.GitHubError as e:
         log.warning("could not assign %s: %s", ctx.actor, e)
-    ctx.say(f"@{ctx.actor} `{command_text.split(' ', 1)[1]}` is ready for review: {pr['html_url']}")
+    if announce:
+        ctx.say(f"@{ctx.actor} `{command_text.split(' ', 1)[1]}` is ready for review: {pr['html_url']}")
     return pr["html_url"]
 
 
@@ -394,6 +405,93 @@ def do_update(ctx: Context, job: Job) -> None:
                  summary=f"Task: {task}\n\n{summary}",
                  review=f"Claude could only edit existing files in {', '.join(f'`{t}`' for t in targets)} and at the top level of the "
                         "repository. Review every change before merging: it can still be wrong.")
+
+
+
+# ----------------------------------------------------------------------------------------- review
+
+# aisignoff's findings levels, as the lines of the reviewed files show them once the record is merged
+FINDINGS_LEVEL = {"none": "F0", "trivial": "F0", "minor": "F1", "major": "F2", "critical": "F3"}
+
+
+def _record_review(ctx: Context, clone: Path, files: list[str], findings: str, reviewed_by: str) -> tuple[list[str], str]:
+    """Attest the reviewed files at A1 with aisignoff, as a new record file in the review folder.
+    The new files, and a note for the person (why nothing was recorded, or what aisignoff remarked)."""
+    if not (clone / "SIGNOFF.toml").is_file():
+        return [], (f"This repository has no `SIGNOFF.toml`, so the review isn't recorded: "
+                    f"`@{ctx.cfg.handle} setup aisignoff` sets it up.")
+    try:
+        from aisignoff.project import Project
+        declared = set(Project(clone).files())
+    except Exception as e:   # ConfigError, ProjectError: a SIGNOFF.toml aisignoff can't read
+        return [], f"aisignoff can't read `SIGNOFF.toml`, so the review isn't recorded: {e}"
+    files = [f for f in files if f in declared]
+    if not files:
+        return [], "None of the reviewed files needs a declaration in `SIGNOFF.toml`, so there is nothing to record."
+    r = _run([sys.executable, "-m", "aisignoff", "--root", str(clone), "attest", "-a", "A1", "--findings", findings,
+              "--ai-reviewed-by", reviewed_by, "--", *files], clone, {}, timeout=300)
+    if r.returncode:
+        why = (r.stderr.strip().splitlines() or ["no reason given"])[-1]
+        return [], f"aisignoff couldn't record the review: {why}"
+    status = subprocess.run(["git", "-C", str(clone), "status", "--porcelain", "-z", "--untracked-files=all"],
+                            check=True, capture_output=True, text=True).stdout
+    new = [e[3:] for e in status.split("\0") if e.startswith("?? ")]
+    notes = [line.removeprefix("note: ") for line in r.stdout.splitlines() if line.startswith("note: ")]
+    return new, " ".join(n[0].upper() + n[1:] + "." for n in notes)
+
+
+def do_review(ctx: Context, job: Job) -> None:
+    targets, context = job.args["targets"], job.args.get("context", [])
+    focus = job.args.get("focus", "").strip()
+    command_text = f"@{ctx.cfg.handle} review {spec(job)}"
+    if not ctx.can_write(ctx.actor):
+        return ctx.refuse(command_text)
+    ctx.react()
+    slug, bot_id = ctx.app.identity(ctx.token())
+    comment_url = (ctx.comment or ctx.issue)["html_url"]
+    model, name = ctx.cfg.review_model, ctx.cfg.review_model_name
+    with tempfile.TemporaryDirectory(prefix="imgagent-") as tmp:
+        tmp = Path(tmp)
+        clone = tmp / "repo"
+        github.clone(ctx.repo, ctx.token(), clone, ref=ctx.default_branch)
+        if gone := missing(clone, targets + context):
+            return no_such(ctx, gone, "review <folders> [with <folders>]`, e.g. `review docs with src")
+        out = tmp / "review.json"
+        env = {**_docs_env(ctx, clone), "TARGETS": ",".join(targets), "CONTEXT": ",".join(context),
+               "FOCUS": focus, "REVIEW_FILE": str(out), "REVIEW_MODEL": model, "REVIEW_EFFORT": ctx.cfg.review_effort}
+        r = _run([sys.executable, str(SCRIPTS / "repo" / "review.py")], clone, env, timeout=15 * 60)
+        if r.returncode or not out.is_file():
+            raise RuntimeError("review.py failed")
+        result = json.loads(out.read_text(encoding="utf-8"))
+        findings = result.get("findings")
+        if findings not in FINDINGS_LEVEL:
+            return ctx.say(f"@{ctx.actor} `review {spec(job)}`: {result.get('markdown', 'nothing to review.')}")
+        reviewed_by = f"{name}, new session without the generating conversation, quick review requested in {comment_url}"
+        record, note = _record_review(ctx, clone, result.get("files", []), findings, reviewed_by)
+        url = None
+        if record:
+            sha = subprocess.run(["git", "-C", str(clone), "rev-parse", "--short", "HEAD"], check=True,
+                                 capture_output=True, text=True).stdout.strip()
+            count = len(result.get("files", []))
+            body = (f"## What does this PR change?\n\nRecords the quick AI review that @{ctx.actor} asked for in "
+                    f"{comment_url} (`{command_text}`) as an aisignoff **A1** attestation of the files in "
+                    f"{', '.join(f'`{t}`' for t in targets)} as of {sha}: {', '.join(f'`{p}`' for p in record)}.\n\n"
+                    f"Findings: **{findings}**, so once this is merged the lines of the {count} reviewed file(s) "
+                    f"show **{FINDINGS_LEVEL[findings]}** until they change.\n\n{result['markdown']}\n\n"
+                    f"{note}\n\nThis pull request only adds a record to the review folder, so it needs no AI "
+                    f"declaration. Check that the findings above are fair before merging.").replace("\n\n\n\n", "\n\n")
+            name_ = re.sub(r"[^a-z0-9]+", "-", "-".join(targets).lower()).strip("-")[:40] or "repo"
+            url = _open_pr(ctx, clone, record, slug=slug, bot_id=bot_id, model=model, announce=False,
+                           branch=f"{slug}/review-{name_}-{secrets.token_hex(4)}",
+                           title=f"Record a quick review of {', '.join(targets)} (A1, findings: {findings})",
+                           command_text=command_text, summary="", review="", body=body)
+    lines = f"AI-Review: A1\nAI-Reviewed-by: {reviewed_by}\nAI-Review-Findings: {findings}"
+    with_ = f", checked against {', '.join(f'`{c}`' for c in context)}" if context else ""
+    recorded = (f"Recorded as an A1 attestation in {url}: merging it marks the reviewed lines "
+                f"**{FINDINGS_LEVEL[findings]}**." if url else note)
+    ctx.say(f"@{ctx.actor} quick review of {', '.join(f'`{t}`' for t in targets)}{with_}: findings **{findings}**"
+            f"\n\n{result['markdown']}\n\n```\n{lines}\n```\n\n{recorded}"
+            + FOOTER.format(what=f"reviewed with {model}, effort {ctx.cfg.review_effort}; a quick check, not a full review"))
 
 
 # ------------------------------------------------------------------------------------------ setup
@@ -625,7 +723,7 @@ def do_signoff(ctx: Context, job: Job) -> None:
                                "SIGNOFF_ASSISTANT_COMMAND": command})
 
 
-HANDLERS = {"help": do_help, "ask": do_ask, "update": do_update, "make": do_make, "setup": do_setup, "setup-done": do_setup_done,
+HANDLERS = {"help": do_help, "ask": do_ask, "update": do_update, "make": do_make, "review": do_review, "setup": do_setup, "setup-done": do_setup_done,
             "signoff": do_signoff, "signoff-form": do_signoff_form}
 
 

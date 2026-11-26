@@ -8,6 +8,7 @@ or a comment, GitHub sends the event to this server, and IMGAgent answers as `im
 | `@IMGAgent signoff` and your words | new issue or issue comment | Claude turns them into the answers of the signoff form; IMGAgent opens a `SIGNOFF.toml` pull request, or asks what is missing |
 | `@IMGAgent ask <folders> [with <folders>]` and a question | anywhere in a comment or a new issue | Claude answers from the files in those folders, e.g. `ask docs` or `ask docs,src` |
 | `@IMGAgent update <folders> [with <folders>]` and a task | anywhere in a comment or a new issue | Claude carries out a small task by editing existing files in the folders and at the top level, reading the `with` folders; IMGAgent opens a pull request |
+| `@IMGAgent review <folders> [with <folders>]` and an optional focus | anywhere in a comment or a new issue | Claude (Sonnet, low effort) gives a quick review of the folders, checked against the `with` folders; IMGAgent records it as an aisignoff A1 attestation with its findings in `reviews/` and opens a pull request |
 | `@IMGAgent make docs [with <folders>]` and a hint | anywhere in a comment or a new issue | Claude rebuilds `docs/` from the code (or only from the `with` folders); IMGAgent opens a pull request |
 | `@IMGAgent setup reuse`, `aisignoff`, `citation` or `docs` | anywhere in a comment or a new issue | IMGAgent posts a template for `REUSE.toml`, `SIGNOFF.toml`, `CITATION.cff` or `zensical.toml` with defaults filled in; ticking its **Done** box opens the pull request, without AI |
 | `@IMGAgent help` | anywhere in a comment or a new issue | the list of commands |
@@ -23,7 +24,8 @@ the docs still describe the old commands; bring them in line with the code
 - **Folders** are a comma-separated list of folders (or files) of the repository, as relative paths such as `docs`,
   `src/package` or `pyproject.toml`; spaces around the commas are fine. Every folder must exist, and `..`, absolute
   paths, `.git` and glob characters are refused.
-- **`with <folders>`** on the same line adds folders that Claude only reads. For `ask` it makes no difference.
+- **`with <folders>`** on the same line adds folders that Claude only reads. For `ask` it makes no difference;
+  for `review` they are the context the reviewed folders are checked against.
 - **The text** (question, task or hint) may start on the same line or on the next one, and span several lines.
   Start it on the next line if it begins with the word "with".
 
@@ -32,6 +34,7 @@ the docs still describe the old commands; bring them in line with the code
 | `ask docs,src` | `docs`, `src` | nothing |
 | `update src` | `src` and the top-level files (`pyproject.toml`, `README.md`, ...) | existing files among those, never `.github/workflows/` |
 | `update docs with src` | `docs`, the top-level files and `src` | existing files in `docs` and at the top level |
+| `review docs with src` | `docs` and `src` | nothing; the pull request only adds an A1 record to `reviews/` |
 | `make docs` | all the code | `docs/` and `zensical.toml`, creating and removing pages |
 | `make docs with src` | `src` and the top-level files | the same |
 
@@ -178,7 +181,8 @@ All in `.env` (see `.env.example`): the App (`IMGAGENT_APP_ID`, `IMGAGENT_WEBHOO
 file `imgagent.pem` or `IMGAGENT_PRIVATE_KEY`), `IMGAGENT_ALLOWED_OWNERS`, `ANTHROPIC_API_KEY`, and optionally
 `IMGAGENT_HANDLE`, `IMGAGENT_SIGNOFF_FORM`, `IMGAGENT_WORKERS` and the models (`ASK_MODEL` default
 `claude-haiku-5-5` for `ask`, `WRITER_MODEL` default `claude-opus-5-5` and `WRITER_EFFORT` for `update` and `make`,
-`SIGNOFF_MODEL` default `claude-sonnet-5-5` with `SIGNOFF_MODEL_NAME`, keep both in step). The old names
+`SIGNOFF_MODEL` default `claude-sonnet-5-5` with `SIGNOFF_MODEL_NAME`, keep both in step; `REVIEW_MODEL` default
+`claude-sonnet-5-5` with `REVIEW_MODEL_NAME` and `REVIEW_EFFORT` default `low` for `review`). The old names
 `DOCS_ASK_MODEL`, `DOCS_WRITER_MODEL` and `DOCS_WRITER_EFFORT` still work.
 
 ## Safety

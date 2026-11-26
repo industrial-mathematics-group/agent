@@ -42,6 +42,8 @@ def T(targets, context=(), **text):
     ("@IMGAgent update src require Python 3.13\nalso in CI", "update", T(["src"], task="require Python 3.13\nalso in CI")),
     ("@IMGAgent update docs WITH src,docs\nfix what is outdated", "update", T(["docs"], ["src"], task="fix what is outdated")),
     ("@IMGAgent update docs,tests with src", "update", T(["docs", "tests"], ["src"], task="")),
+    ("@IMGAgent review docs with src", "review", T(["docs"], ["src"], focus="")),
+    ("@IMGAgent review docs,README.md check the install steps", "review", T(["docs", "README.md"], focus="check the install steps")),
     ("@IMGAgent help", "help", {"problem": ""}),
     ("@IMGAgent", "help", {"problem": ""}),
     ("@IMGAgent deploy now", "help", {"problem": "I don't know `deploy now`."}),
@@ -65,6 +67,8 @@ def test_routes_comments(body, kind, args):
     ("@IMGAgent make docs,src", "only knows `docs`"),
     ("@IMGAgent docs ask how?", "action then target: `@IMGAgent ask docs ...`"),
     ("@IMGAgent docs make", "`@IMGAgent make docs ...`"),
+    ("@IMGAgent review", "`review` needs a folder"),
+    ("@IMGAgent review ../x", "not a path"),
 ])
 def test_bad_targets_get_help(body, problem):
     job = commands.route("issue_comment", comment(body), C)
@@ -121,6 +125,7 @@ def test_routes_issues():
 def test_job_keys():
     assert commands.Job("make").key("o/r", 7) == "o/r#write"
     assert commands.Job("update").key("o/r", 8) == "o/r#write"
+    assert commands.Job("review").key("o/r", 8) == "o/r#write"
     assert commands.Job("ask").key("o/r", 7) == "o/r#7"
     assert commands.Job("signoff").key("o/r", 7) == "o/r#7"
 
@@ -429,3 +434,51 @@ def test_unanswered_only_checks_for_a_bot_comment(monkeypatch, tmp_path, comment
     ran.clear()
     jobs.run(ctx, commands.Job("ask", T(["src"], question="x")))   # a new comment always runs
     assert ran
+
+
+SIGNOFF = 'version = 4\n\n[[annotations]]\npath = "**"\nAI-Generation = "G0"\nHuman-Review = "H0"\nAI-Review = "A0"\nReviewed-by = ["Pascal"]\n'
+REVIEW_SCRIPT = ("import json\n"
+                 "assert os.environ['TARGETS'] == 'docs' and os.environ['CONTEXT'] == 'src'\n"
+                 "assert os.environ['REVIEW_MODEL'] == 'claude-sonnet-5-5' and os.environ['FOCUS'] == 'install'\n"
+                 "pathlib.Path(os.environ['REVIEW_FILE']).write_text(json.dumps({'findings': 'minor', "
+                 "'files': ['docs/a.md'], 'markdown': 'Mostly fine.\\n\\n- **minor** `docs/a.md`: typo'}))\n")
+
+
+def test_review_records_an_a1_attestation(monkeypatch, tmp_path):
+    import tomllib
+    origin = make_origin(tmp_path, {"docs/a.md": "# A\n", "src/x.py": "x = 1\n", "SIGNOFF.toml": SIGNOFF})
+    fake_script(tmp_path, monkeypatch, "repo/review.py", REVIEW_SCRIPT)
+    payload = comment("@IMGAgent review docs with src install")
+    payload["comment"]["html_url"] = "https://github.com/o/r/issues/7#c1"
+    ctx, calls = fake_context(monkeypatch, tmp_path, payload, origin)
+    jobs.do_review(ctx, commands.Job("review", T(["docs"], ["src"], focus="install")))
+
+    branch, changed = branch_files(origin, "imgagent/review-docs-")
+    [record] = [c.split("\t")[1] for c in changed if c]
+    assert changed[0].startswith("A\treviews/") and record.endswith(".toml")
+    import subprocess
+    text = subprocess.run(["git", "-C", str(origin), "show", f"{branch}:{record}"], capture_output=True, text=True).stdout
+    [att] = tomllib.loads(text)["attestations"]
+    assert att["path"] == "docs/a.md" and att["AI-Review"] == "A1" and att["AI-Review-Findings"] == "minor"
+    assert att["AI-Reviewed-by"] == ["Claude Sonnet 5.5 (Anthropic), new session without the generating conversation, "
+                                     "quick review requested in https://github.com/o/r/issues/7#c1"]
+    pr = next(b for m, p, b in calls if p.endswith("/pulls"))
+    assert pr["title"] == "Record a quick review of docs (A1, findings: minor)"
+    assert "needs no AI declaration" in pr["body"] and "## AI declaration" not in pr["body"]
+    says = [b["body"] for m, p, b in calls if p.endswith("/comments")]
+    assert len(says) == 1   # one answer: the review, the lines to copy and the pull request
+    assert "findings **minor**" in says[0] and "AI-Review: A1\n" in says[0] and "AI-Review-Findings: minor" in says[0]
+    assert "https://github.com/o/r/pull/9" in says[0] and "**F1**" in says[0]
+
+
+def test_review_without_signoff_only_answers(monkeypatch, tmp_path):
+    origin = make_origin(tmp_path, {"docs/a.md": "# A\n", "src/x.py": "x = 1\n"})
+    fake_script(tmp_path, monkeypatch, "repo/review.py", REVIEW_SCRIPT)
+    payload = comment("@IMGAgent review docs with src install")
+    payload["comment"]["html_url"] = "https://github.com/o/r/issues/7#c1"
+    ctx, calls = fake_context(monkeypatch, tmp_path, payload, origin)
+    jobs.do_review(ctx, commands.Job("review", T(["docs"], ["src"], focus="install")))
+    assert not any(p.endswith("/pulls") for m, p, b in calls)
+    assert "no `SIGNOFF.toml`" in calls[-1][2]["body"] and "AI-Review-Findings: minor" in calls[-1][2]["body"]
+    jobs.do_review(ctx, commands.Job("review", T(["nope"])))
+    assert "there is no `nope`" in calls[-1][2]["body"]

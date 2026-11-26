@@ -23,7 +23,7 @@ def repo(tmp_path, monkeypatch):
     subprocess.run(["git", "-C", str(tmp_path), "add", "--", *files], check=True)
     monkeypatch.setenv("REPO_ROOT", str(tmp_path))
     monkeypatch.syspath_prepend(str(ROOT / "scripts" / "repo"))
-    for m in ("common", "update", "ask"):
+    for m in ("common", "update", "ask", "review"):
         sys.modules.pop(m, None)
     return tmp_path
 
@@ -100,3 +100,37 @@ def test_ask_cites_docs_pages_only_for_docs(repo, monkeypatch):
     assert ask.PATHS == ["docs", "src"]
     assert "by their path in the repository" in ask.instructions() and "`docs`, `src`" in ask.instructions()
     assert ask.MODEL == "claude-haiku-5-5"
+
+
+def test_review_keeps_findings_in_the_reviewed_files(repo, monkeypatch):
+    import json
+    from types import SimpleNamespace as NS
+    monkeypatch.setenv("TARGETS", "src")
+    monkeypatch.setenv("CONTEXT", "docs")
+    review = importlib.import_module("review")
+    seen = {}
+    found = [{"severity": "minor", "path": "src/a.py", "where": "", "problem": "old", "fix": "bump"},
+             {"severity": "critical", "path": "docs/i.md", "where": "", "problem": "context", "fix": ""},
+             {"severity": "major", "path": "src/sub/b.py", "where": "line 1", "problem": "wrong", "fix": ""}]
+
+    class Stream:
+        def __init__(self, **kw):
+            seen.update(kw)
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def get_final_message(self):
+            text = json.dumps({"summary": "Two problems.", "findings": found})
+            return NS(content=[NS(type="text", text=text)], stop_reason="end_turn", model="m",
+                      usage=NS(input_tokens=1, cache_creation_input_tokens=0, cache_read_input_tokens=0, output_tokens=1))
+
+    client = NS(beta=NS(messages=NS(stream=lambda **kw: Stream(**kw))))
+    result = review.review("", client)
+    assert seen["model"] == "claude-sonnet-5-5" and seen["output_config"]["effort"] == "low"
+    system = "".join(b["text"] for b in seen["system"])
+    assert '<reviewed>\n<file path="src/a.py">' in system and '<context>\n<file path="docs/i.md">' in system
+    assert result["findings"] == "major" and result["files"] == ["src/a.py", "src/sub/b.py"]
+    assert result["markdown"].splitlines()[2].startswith("- **major** `src/sub/b.py` (line 1): wrong")
+    assert "context" not in result["markdown"]
+    assert review.highest([]) == "none" and "No findings." in review.markdown("Fine.", [])
