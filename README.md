@@ -9,6 +9,7 @@ or a comment, GitHub sends the event to this server, and IMGAgent answers as `im
 | `@IMGAgent ask <folders> [with <folders>]` and a question | anywhere in a comment or a new issue | Claude answers from the files in those folders, e.g. `ask docs` or `ask docs,src` |
 | `@IMGAgent update <folders> [with <folders>]` and a task | anywhere in a comment or a new issue | Claude carries out a small task by editing existing files in the folders and at the top level, reading the `with` folders; IMGAgent opens a pull request |
 | `@IMGAgent make docs [with <folders>]` and a hint | anywhere in a comment or a new issue | Claude rebuilds `docs/` from the code (or only from the `with` folders); IMGAgent opens a pull request |
+| `@IMGAgent setup reuse`, `aisignoff`, `citation` or `docs` | anywhere in a comment or a new issue | IMGAgent posts a template for `REUSE.toml`, `SIGNOFF.toml`, `CITATION.cff` or `zensical.toml` with defaults filled in; ticking its **Done** box opens the pull request, without AI |
 | `@IMGAgent help` | anywhere in a comment or a new issue | the list of commands |
 | the issue form *Signoff: declare or attest files* | new or edited issue | IMGAgent opens the `SIGNOFF.toml` pull request, without AI (`IMGAGENT_SIGNOFF_FORM`) |
 
@@ -33,6 +34,19 @@ the docs still describe the old commands; bring them in line with the code
 | `update docs with src` | `docs`, the top-level files and `src` | existing files in `docs` and at the top level |
 | `make docs` | all the code | `docs/` and `zensical.toml`, creating and removing pages |
 | `make docs with src` | `src` and the top-level files | the same |
+
+`setup <reuse|aisignoff|citation|docs>` needs no text: IMGAgent answers with a template for the file, its
+defaults already filled in from the repository and from you. Tick boxes in the comment, change the values between
+backticks if needed (*Edit*), then tick **Done** (or reply `@IMGAgent setup <target> done`). IMGAgent turns the form
+into the file and opens a pull request; if something can't be used, it unticks **Done** and says why on top of the
+form. No model is involved, so the pull requests are declared G0. An existing file is never replaced.
+
+| Command | Template | Pull request |
+|---|---|---|
+| `setup reuse` | copyright, the common licenses as boxes (the repository's license ticked for `.`), each with the folders it is for, and two free lines for other licenses | `REUSE.toml`, and the license texts in `LICENSES/` from the SPDX license list |
+| `setup aisignoff` | the default declaration (paths, levels, names), `[history]` (on, default branch, merge method), exclusions, policy, recheck | `SIGNOFF.toml`, checked with aisignoff |
+| `setup citation` | title, message, type, authors with ORCID, version, date, license, repository, DOI, abstract, keywords (from the repository) | `CITATION.cff` |
+| `setup docs` | site name, description, address | `zensical.toml` as `make docs` writes it, with the nav of the pages in `docs/` (and a `docs/index.md` if missing) |
 
 `update` never creates, deletes or renames a file: it is for small tasks over several files, such as
 `update src` + "require Python 3.13" or `update docs with src` + "fix what is outdated". `make` creates files,
@@ -147,7 +161,7 @@ caller while `IMGAGENT_SIGNOFF_FORM=true`), so two bots don't answer the same th
 
 - `make docs` writes a Zensical site: `docs/` and `zensical.toml`. Without them, it creates both (a complete `zensical.toml` with theme, Markdown extensions and nav); an existing `zensical.toml` keeps everything but its `nav`.
   `ask` and `update` only need the folders you name.
-- `signoff` and the form need a `SIGNOFF.toml` (`aisignoff init`). The pull requests follow the organisation's
+- `signoff` and the form need a `SIGNOFF.toml` (`aisignoff init`, or `@IMGAgent setup aisignoff`). The pull requests follow the organisation's
   PR template, so *PR-signoff* checks them; as an App's pull requests, they start the repository's checks.
 - Optional `.github/imgagent.toml` on the default branch, to tell Claude more than the repository description:
 
@@ -176,6 +190,8 @@ file `imgagent.pem` or `IMGAGENT_PRIVATE_KEY`), `IMGAGENT_ALLOWED_OWNERS`, `ANTH
 - Folders are checked twice: by name when the command is read, and in the clone (they must exist and stay inside
   the repository, also through symlinks). `update` commits only modified tracked files under its target folders or
   at the top level, never the `with` folders; anything else the script left in the clone stays out of the pull request.
+- `setup reuse` fetches the license texts for `LICENSES/` from the SPDX license list
+  (`raw.githubusercontent.com/spdx/license-list-data`); nothing else is fetched besides GitHub's API and clones.
 - Each job works in a temporary clone that is deleted afterwards. The container runs as an unprivileged user on a
   read-only root file system; tokens are installation tokens that expire after an hour.
 - The Claude key and the private key live only in `.env` and `imgagent.pem` on the VPS; neither is in git.
