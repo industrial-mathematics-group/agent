@@ -9,6 +9,7 @@ You talk to IMGAgent by writing a command in an issue or a comment. This page co
 | `@IMGAgent ask <folders> [with <folders>]` and a question | Claude answers from the files in those folders | [ask](ask.md) |
 | `@IMGAgent update <folders> [with <folders>]` and a task | Claude edits existing files in the folders and at the top level, reading the `with` folders; IMGAgent opens a pull request | [update](update.md) |
 | `@IMGAgent make docs [with <folders>]` and a hint | Claude rebuilds `docs/` from the code (or only from the `with` folders); IMGAgent opens a pull request | [make docs](make-docs.md) |
+| `@IMGAgent review <folders> [with <folders>]` and an optional focus | a quick Claude review of the folders, checked against the `with` folders; IMGAgent records it as an aisignoff A1 attestation in a pull request | [review](review.md) |
 | `@IMGAgent setup reuse\|aisignoff\|citation\|docs` | a template for `REUSE.toml`, `SIGNOFF.toml`, `CITATION.cff` or `zensical.toml` with defaults filled in; ticking **Done** opens a pull request, without AI | [setup](setup.md) |
 | `@IMGAgent signoff` and your words | records how files were made and reviewed: a `SIGNOFF.toml` pull request | [signoff](signoff.md) |
 | `@IMGAgent help` | the list of commands | |
@@ -17,7 +18,7 @@ The issue form *Signoff: declare or attest files* also leads to a `SIGNOFF.toml`
 
 ## Syntax
 
-`ask`, `update` and `make` follow the same pattern: action, then folders, then text.
+`ask`, `update`, `make` and `review` follow the same pattern: action, then folders, then text.
 
 ```
 @IMGAgent <action> <folders> [with <folders>]
@@ -32,7 +33,7 @@ the docs still describe the old commands; bring them in line with the code
 ```
 
 Action
-:   `ask`, `update`, `make`, `setup` or `help`. Case does not matter. `setup` takes `reuse`, `aisignoff`, `citation` or `docs` instead of folders, and no text; see [setup](setup.md).
+:   `ask`, `update`, `make`, `review`, `setup` or `help`. Case does not matter. `setup` takes `reuse`, `aisignoff`, `citation` or `docs` instead of folders, and no text; see [setup](setup.md).
 
 Folders
 :   A comma-separated list of folders or files of the repository, as relative paths such as `docs`, `src/package` or `pyproject.toml`. Spaces around the commas are fine (`docs, src`). A path may be wrapped in backticks, and a leading `./` or trailing `/` is dropped. Duplicates are ignored.
@@ -61,9 +62,9 @@ A refused path gets a help reply naming it. When the job runs, each path is chec
 
 ### Limits per action
 
-- `ask`, `update` and `make` all need at least one folder after the action. Without one, IMGAgent replies with help explaining the usage.
+- `ask`, `update`, `make` and `review` all need at least one folder after the action. Without one, IMGAgent replies with help explaining the usage.
 - `make` only knows `docs` for now. `make src` gets a help reply suggesting `update src` instead.
-- `ask` without a question and `update` without a task get a reply asking for it. For `make`, the hint is optional.
+- `ask` without a question and `update` without a task get a reply asking for it. For `make` and `review`, the text is optional.
 
 ## Where commands are recognised
 
@@ -108,7 +109,7 @@ Only people with write, maintain or admin permission on the repository are answe
 
 | Command | Without write access |
 |---|---|
-| `ask`, `update`, `make`, `setup` | a reply that the command is only for people with write access |
+| `ask`, `update`, `make`, `review`, `setup` | a reply that the command is only for people with write access |
 | `help` and help replies for mistakes | no reply |
 
 ## What happens after a command
@@ -117,4 +118,4 @@ When `ask`, `update` or `make` starts from a comment, IMGAgent adds an :eyes: re
 
 If a job fails, IMGAgent comments that it couldn't finish, and the details are in the server log; see [troubleshooting](../operations/troubleshooting.md).
 
-`update` and `make` jobs in the same repository run one after the other. Other jobs run one after the other per issue. See [HTTP endpoints](../reference/http-endpoints.md).
+`update`, `make`, `review` and `setup` jobs in the same repository run one after the other. Other jobs run one after the other per issue. See [HTTP endpoints](../reference/http-endpoints.md).

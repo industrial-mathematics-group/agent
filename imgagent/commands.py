@@ -6,6 +6,8 @@ Commands are "@IMGAgent <action> <paths> [with <paths>] [text]":
     update <paths> [with <paths>]    small edits to existing files under the first paths and the top-level
                                      files; the paths after "with" are read-only context
     make docs [with <paths>]         build the docs from the code (all of it, or only the "with" paths)
+    review <paths> [with <paths>]    a quick AI review of the files under the first paths, checked against the
+                                     "with" paths; recorded as an aisignoff A1 attestation in a pull request
     setup reuse|aisignoff|citation|docs
                                      post a template for REUSE.toml, SIGNOFF.toml, CITATION.cff or zensical.toml;
                                      ticking its "Done" box (or "setup <target> done") opens the pull request
@@ -33,12 +35,12 @@ _SEGMENT = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$|^\.[A-Za-z0-9_][A-Za-z0-9.
 
 @dataclass
 class Job:
-    kind: str                     # ask | update | make | setup | setup-done | signoff | signoff-form | help
+    kind: str                     # ask | update | make | review | setup | setup-done | signoff | signoff-form | help
     args: dict = field(default_factory=dict)
 
     def key(self, repo: str, number: int) -> str:
         """Jobs with the same key run one after the other. Jobs that open pull requests share one per repository."""
-        return f"{repo}#write" if self.kind in ("make", "update", "setup", "setup-done") else f"{repo}#{number}"
+        return f"{repo}#write" if self.kind in ("make", "update", "review", "setup", "setup-done") else f"{repo}#{number}"
 
 
 def clean_target(raw: str) -> str | None:
@@ -69,7 +71,8 @@ def signoff_pattern(handle: str) -> re.Pattern:
 _LIST = r"[^\s,]+(?:[ \t]*,[ \t]*[^\s,]+)*"
 _SPEC = r"[ \t]+(?P<targets>" + _LIST + r")(?:[ \t]+with[ \t]+(?P<context>" + _LIST + r"))?"
 USAGE = {"ask": "ask <folders> [with <folders>]", "update": "update <folders> [with <folders>]",
-         "make": "make docs [with <folders>]", "setup": "setup reuse|aisignoff|citation|docs"}
+         "make": "make docs [with <folders>]", "review": "review <folders> [with <folders>]",
+         "setup": "setup reuse|aisignoff|citation|docs"}
 
 
 def _paths(raw: str | None) -> tuple[list[str], str | None]:
@@ -96,7 +99,7 @@ def action_job(action: str, targets_raw: str | None, context_raw: str | None, re
             return Job("help", {"problem": f"`setup` knows `reuse` (REUSE.toml), `aisignoff` (SIGNOFF.toml), "
                                            f"`citation` (CITATION.cff) and `docs` (zensical.toml), {what}."})
         return Job("setup", {"target": target, "done": rest.strip().lower().rstrip(".!").startswith("done")})
-    usage = f"`{USAGE[action]}`, then the {dict(ask='question', update='task', make='hint')[action]}"
+    usage = f"`{USAGE[action]}`, then the {dict(ask='question', update='task', make='hint', review='focus (optional)')[action]}"
     if not targets_raw:
         return Job("help", {"problem": f"`{action}` needs a folder: {usage}."})
     targets, bad = _paths(targets_raw)
@@ -110,7 +113,7 @@ def action_job(action: str, targets_raw: str | None, context_raw: str | None, re
             return Job("help", {"problem": f"`make` only knows `docs` for now, not `{', '.join(targets)}`. "
                                            f"To change existing files, use `update {','.join(targets)}`."})
         return Job("make", {"targets": targets, "context": context, "hint": rest})
-    key = "question" if action == "ask" else "task"
+    key = {"ask": "question", "update": "task", "review": "focus"}[action]
     return Job(action, {"targets": targets, "context": context, key: rest})
 
 
@@ -137,7 +140,7 @@ def find_command(text: str, handle: str) -> Job | None:
     text = normalise(text)
     search = _searchable(text)
     mention = r"(?<![\w@/`])\**@" + re.escape(handle) + r"(?:\[bot\])?(?![\w-])\**[:,]?"
-    m = re.search(mention + r"[ \t]+(?P<verb>ask|update|make|setup|help)\b", search, re.I)
+    m = re.search(mention + r"[ \t]+(?P<verb>ask|update|make|review|setup|help)\b", search, re.I)
     if m:
         verb = m["verb"].lower()
         if verb == "help":
@@ -156,7 +159,7 @@ def find_command(text: str, handle: str) -> Job | None:
     verb = words[0].lower() if words else ""
     if verb == "signoff":
         return None   # the signoff assistant's own rules decide
-    if verb == "docs" and len(words) > 1 and words[1].lower() in ("ask", "update", "make"):
+    if verb == "docs" and len(words) > 1 and words[1].lower() in ("ask", "update", "make", "review"):
         return Job("help", {"problem": f"commands are now action then target: `@{handle} {words[1].lower()} docs ...`."})
     return Job("help", {"problem": f"I don't know `{' '.join(words[:2])}`." if verb else ""})
 

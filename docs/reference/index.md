@@ -93,6 +93,9 @@ See [Expose it to GitHub](../getting-started/expose.md) for when to change that 
 | `SIGNOFF_MODEL` | | `claude-sonnet-5-5` | `signoff` |
 | `SIGNOFF_MODEL_NAME` | | `Claude Sonnet 5.5 (Anthropic)` | `signoff` |
 | `SIGNOFF_EFFORT` | | `medium` | `signoff` |
+| `REVIEW_MODEL` | | `claude-sonnet-5-5` | `review` |
+| `REVIEW_MODEL_NAME` | | `Claude Sonnet 5.5 (Anthropic)` | `review` |
+| `REVIEW_EFFORT` | | `low` | `review` |
 
 The old `DOCS_*` names date from when every command was about `docs/`. They still work; the new name wins when both are set.
 
