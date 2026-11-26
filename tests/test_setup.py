@@ -117,7 +117,11 @@ def test_signoff_choices_and_problems():
     data = tomllib.loads(setup.signoff_toml(setup.read_form(t)))
     assert data["annotations"][0]["AI-Generation"] == "G2" and data["annotations"][0]["Assisted-by"] == ["Claude Opus"]
     assert "history" not in data and data["exclude"] == ["reviews/**", "build/**"]
-    assert data["policy"] == {"G3": {"human": "H2", "ai": "A1"}}
+    assert data["policy"] == {"G3": {"human": "H2", "ai": "A1"}} and "review" not in data
+    assert tomllib.loads(setup.signoff_toml(setup.read_form(value(t, "review-dir", "./ai-reviews/"))))["review"] == {"dir": "ai-reviews"}
+    assert tomllib.loads(setup.signoff_toml(setup.read_form(value(t, "review-dir", " "))))["review"] == {"dir": ""}
+    with pytest.raises(setup.SetupError, match="can't read"):
+        setup.signoff_toml(setup.read_form(value(t, "review-dir", "../elsewhere")))
     with pytest.raises(setup.SetupError, match="tick exactly one box under \\*\\*AI-Generation"):
         setup.signoff_toml(setup.read_form(tick(t, "generation=G1")))
     with pytest.raises(setup.SetupError, match="doesn't fit together"):
