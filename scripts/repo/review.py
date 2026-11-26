@@ -2,7 +2,7 @@
 
 It is a light check, not an exhaustive one: one call, low effort, at most a handful of findings, each with
 its severity in aisignoff's terms (critical, major, minor, trivial). IMGAgent records the result as an A1
-attestation (a context-free AI review) of the reviewed files, with the highest severity as its findings.
+attestation (a context-free AI review) of each reviewed file, with that file's highest severity as its findings.
 
 Run it locally, from the root of the repository:
     pip install anthropic
@@ -11,7 +11,9 @@ Run it locally, from the root of the repository:
 
 In IMGAgent (imgagent/jobs.py, started by "@IMGAgent review <folders> [with <folders>]") the optional focus
 comes from the FOCUS environment variable and the result is written as JSON to the file in REVIEW_FILE:
-    {"findings": "none|trivial|minor|major|critical", "files": [...reviewed files...], "markdown": "..."}
+    {"findings": "<highest overall>", "files": [...reviewed files...], "per_file": {"<file>": "<its highest>"},
+     "markdown": "..."}
+with the levels none, trivial, minor, major or critical. Each file is attested with its own level.
 
 Environment:
     REPO_ROOT          the repository, default the current directory
@@ -142,7 +144,10 @@ def review(focus: str, client=None) -> dict:
     if dropped := len(result.get("findings", [])) - len(findings):
         print(f"dropped {dropped} finding(s) outside the reviewed files", file=sys.stderr)
     findings = sorted(findings, key=lambda f: -SEVERITIES.index(f["severity"]))[:MAX_FINDINGS]
-    return {"findings": highest(findings), "files": list(targets), "markdown": markdown(result.get("summary", ""), findings)}
+    # Each file is attested with its own highest finding: one major problem in one file says nothing about the others.
+    per_file = {rel: highest([f for f in findings if f["path"] == rel]) for rel in targets}
+    return {"findings": highest(findings), "files": list(targets), "per_file": per_file,
+            "markdown": markdown(result.get("summary", ""), findings)}
 
 
 def main() -> None:

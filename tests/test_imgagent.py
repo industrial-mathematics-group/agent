@@ -441,12 +441,15 @@ REVIEW_SCRIPT = ("import json\n"
                  "assert os.environ['TARGETS'] == 'docs' and os.environ['CONTEXT'] == 'src'\n"
                  "assert os.environ['REVIEW_MODEL'] == 'claude-sonnet-5-5' and os.environ['FOCUS'] == 'install'\n"
                  "pathlib.Path(os.environ['REVIEW_FILE']).write_text(json.dumps({'findings': 'minor', "
-                 "'files': ['docs/a.md'], 'markdown': 'Mostly fine.\\n\\n- **minor** `docs/a.md`: typo'}))\n")
+                 "'files': ['docs/a.md', 'docs/b.md', 'docs/c.md'], "
+                 "'per_file': {'docs/a.md': 'minor', 'docs/b.md': 'none', 'docs/c.md': 'none'}, "
+                 "'markdown': 'Mostly fine.\\n\\n- **minor** `docs/a.md`: typo'}))\n")
 
 
 def test_review_records_an_a1_attestation(monkeypatch, tmp_path):
     import tomllib
-    origin = make_origin(tmp_path, {"docs/a.md": "# A\n", "src/x.py": "x = 1\n", "SIGNOFF.toml": SIGNOFF})
+    origin = make_origin(tmp_path, {"docs/a.md": "# A\n", "docs/b.md": "# B\n", "docs/c.md": "# C\n",
+                                    "src/x.py": "x = 1\n", "SIGNOFF.toml": SIGNOFF})
     fake_script(tmp_path, monkeypatch, "repo/review.py", REVIEW_SCRIPT)
     payload = comment("@IMGAgent review docs with src install")
     payload["comment"]["html_url"] = "https://github.com/o/r/issues/7#c1"
@@ -458,17 +461,21 @@ def test_review_records_an_a1_attestation(monkeypatch, tmp_path):
     assert changed[0].startswith("A\treviews/") and record.endswith(".toml")
     import subprocess
     text = subprocess.run(["git", "-C", str(origin), "show", f"{branch}:{record}"], capture_output=True, text=True).stdout
-    [att] = tomllib.loads(text)["attestations"]
-    assert att["path"] == "docs/a.md" and att["AI-Review"] == "A1" and att["AI-Review-Findings"] == "minor"
+    atts = tomllib.loads(text)["attestations"]   # one record file, each file with its own findings
+    assert {a["path"]: a["AI-Review-Findings"] for a in atts} == {"docs/a.md": "minor", "docs/b.md": "none",
+                                                                   "docs/c.md": "none"}
+    assert text.count("# An independent AI review") == 1 and all(a["AI-Review"] == "A1" for a in atts)
+    att = atts[0]
     assert att["AI-Reviewed-by"] == ["Claude Sonnet 5.5 (Anthropic), new session without the generating conversation, "
                                      "quick review requested in https://github.com/o/r/issues/7#c1"]
     pr = next(b for m, p, b in calls if p.endswith("/pulls"))
-    assert pr["title"] == "Record a quick review of docs (A1, findings: minor)"
+    assert pr["title"] == "Record a quick review of docs (A1, highest finding: minor)"
+    assert "- **F1** (minor): `docs/a.md`\n- **F0** (none): `docs/b.md`, `docs/c.md`" in pr["body"]
     assert "needs no AI declaration" in pr["body"] and "## AI declaration" not in pr["body"]
     says = [b["body"] for m, p, b in calls if p.endswith("/comments")]
     assert len(says) == 1   # one answer: the review, the lines to copy and the pull request
-    assert "findings **minor**" in says[0] and "AI-Review: A1\n" in says[0] and "AI-Review-Findings: minor" in says[0]
-    assert "https://github.com/o/r/pull/9" in says[0] and "**F1**" in says[0]
+    assert "highest finding **minor**" in says[0] and "AI-Review: A1\n" in says[0] and "AI-Review-Findings: minor" in says[0]
+    assert "https://github.com/o/r/pull/9" in says[0] and "- **F0** (none): `docs/b.md`, `docs/c.md`" in says[0]
 
 
 def test_review_without_signoff_only_answers(monkeypatch, tmp_path):
