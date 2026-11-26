@@ -9,9 +9,7 @@ or a comment, GitHub sends the event to this server, and IMGAgent answers as `im
 | `@IMGAgent ask <folders> [with <folders>]` and a question | anywhere in a comment or a new issue | Claude answers from the files in those folders, e.g. `ask docs` or `ask docs,src` |
 | `@IMGAgent update <folders> [with <folders>]` and a task | anywhere in a comment or a new issue | Claude carries out a small task by editing existing files in the folders and at the top level, reading the `with` folders; IMGAgent opens a pull request |
 | `@IMGAgent make docs [with <folders>]` and a hint | anywhere in a comment or a new issue | Claude rebuilds `docs/` from the code (or only from the `with` folders); IMGAgent opens a pull request |
-| `@IMGAgent setup reuse` and the annotations | anywhere in a comment or a new issue | IMGAgent writes `REUSE.toml` from `path:`, `copyright:` and `license:` lines and opens a pull request, without AI |
-| `@IMGAgent setup aisignoff` [and `G2 H1 A0`, `reviewed-by: ...`] | anywhere in a comment or a new issue | IMGAgent runs `aisignoff init` and opens a `SIGNOFF.toml` pull request, without AI |
-| `@IMGAgent setup docs` [and `name:`, `description:`, `url:`] | anywhere in a comment or a new issue | IMGAgent writes `zensical.toml` (as `make docs` would) for the pages in `docs/` and opens a pull request, without AI |
+| `@IMGAgent setup reuse`, `aisignoff`, `citation` or `docs` | anywhere in a comment or a new issue | IMGAgent posts a template for `REUSE.toml`, `SIGNOFF.toml`, `CITATION.cff` or `zensical.toml` with defaults filled in; ticking its **Done** box opens the pull request, without AI |
 | `@IMGAgent help` | anywhere in a comment or a new issue | the list of commands |
 | the issue form *Signoff: declare or attest files* | new or edited issue | IMGAgent opens the `SIGNOFF.toml` pull request, without AI (`IMGAGENT_SIGNOFF_FORM`) |
 
@@ -37,27 +35,18 @@ the docs still describe the old commands; bring them in line with the code
 | `make docs` | all the code | `docs/` and `zensical.toml`, creating and removing pages |
 | `make docs with src` | `src` and the top-level files | the same |
 
-`setup <reuse|aisignoff|docs>` creates one configuration file from the settings written below it, as
-`key: value` lines, and refuses when the file already exists (change it with `update` instead):
+`setup <reuse|aisignoff|citation|docs>` needs no text: IMGAgent answers with a template for the file, its
+defaults already filled in from the repository and from you. Tick boxes in the comment, change the values between
+backticks if needed (*Edit*), then tick **Done** (or reply `@IMGAgent setup <target> done`). IMGAgent turns the form
+into the file and opens a pull request; if something can't be used, it unticks **Done** and says why on top of the
+form. No model is involved, so the pull requests are declared G0. An existing file is never replaced.
 
-```
-@IMGAgent setup reuse
-path: **
-copyright: 2026 Industrial Mathematics Group
-license: MIT
-
-path: docs/**
-license: CC-BY-4.0
-```
-
-| Command | Settings | Creates |
+| Command | Template | Pull request |
 |---|---|---|
-| `setup reuse` | one annotation per group of lines: `path` (comma-separated globs, default `**` for the first), `copyright` and `license` (repeatable, an SPDX expression), `precedence`; or a whole `REUSE.toml` in a code block | `REUSE.toml`; the pull request lists the licenses `LICENSES/` still lacks |
-| `setup aisignoff` | none for the commented template, or the three levels (`G2 H1 A0`, or `generation:`, `human:`, `ai:`) with `reviewed-by`, `assisted-by`, `ai-reviewed-by` | `SIGNOFF.toml`, by `aisignoff init` |
-| `setup docs` | optional `name`, `description`, `url` (`none` for no `site_url`) | `zensical.toml` with the nav of the pages in `docs/`, and `docs/index.md` if missing |
-
-Unknown settings are refused, so a typo never silently leaves something out. No model is involved, so the pull
-requests are declared G0.
+| `setup reuse` | copyright, the common licenses as boxes (the repository's license ticked for `.`), each with the folders it is for, and two free lines for other licenses | `REUSE.toml`, and the license texts in `LICENSES/` from the SPDX license list |
+| `setup aisignoff` | the default declaration (paths, levels, names), `[history]` (on, default branch, merge method), exclusions, policy, recheck | `SIGNOFF.toml`, checked with aisignoff |
+| `setup citation` | title, message, type, authors with ORCID, version, date, license, repository, DOI, abstract, keywords (from the repository) | `CITATION.cff` |
+| `setup docs` | site name, description, address | `zensical.toml` as `make docs` writes it, with the nav of the pages in `docs/` (and a `docs/index.md` if missing) |
 
 `update` never creates, deletes or renames a file: it is for small tasks over several files, such as
 `update src` + "require Python 3.13" or `update docs with src` + "fix what is outdated". `make` creates files,
@@ -201,6 +190,8 @@ file `imgagent.pem` or `IMGAGENT_PRIVATE_KEY`), `IMGAGENT_ALLOWED_OWNERS`, `ANTH
 - Folders are checked twice: by name when the command is read, and in the clone (they must exist and stay inside
   the repository, also through symlinks). `update` commits only modified tracked files under its target folders or
   at the top level, never the `with` folders; anything else the script left in the clone stays out of the pull request.
+- `setup reuse` fetches the license texts for `LICENSES/` from the SPDX license list
+  (`raw.githubusercontent.com/spdx/license-list-data`); nothing else is fetched besides GitHub's API and clones.
 - Each job works in a temporary clone that is deleted afterwards. The container runs as an unprivileged user on a
   read-only root file system; tokens are installation tokens that expire after an hour.
 - The Claude key and the private key live only in `.env` and `imgagent.pem` on the VPS; neither is in git.

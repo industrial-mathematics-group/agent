@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -152,9 +153,7 @@ def help_text(handle: str) -> str:
             f"| `@{handle} ask docs,src` and a question | answers from the files in those folders |\n"
             f"| `@{handle} update docs with src` and a task | edits existing files in `docs` and at the top level (no new files), reading `src`, as a pull request |\n"
             f"| `@{handle} make docs [with src]` and a hint | rebuilds `docs/` from the code (or only from `src`), as a pull request |\n"
-            f"| `@{handle} setup reuse` and `path:`, `copyright:`, `license:` lines | creates `REUSE.toml`, as a pull request (no AI) |\n"
-            f"| `@{handle} setup aisignoff` [and `G2 H1 A0`, `reviewed-by:` ...] | creates `SIGNOFF.toml` with `aisignoff init`, as a pull request (no AI) |\n"
-            f"| `@{handle} setup docs` [and `name:`, `description:`, `url:` lines] | creates `zensical.toml` for the pages in `docs/`, as a pull request (no AI) |\n"
+            f"| `@{handle} setup reuse`, `aisignoff`, `citation` or `docs` | a template for `REUSE.toml` (and `LICENSES/`), `SIGNOFF.toml`, `CITATION.cff` or `zensical.toml` with defaults filled in; ticking its **Done** opens the pull request (no AI) |\n"
             f"| `@{handle} signoff` and your words | records how files were made and reviewed: a `SIGNOFF.toml` pull request |\n"
             f"| `@{handle} help` | this list |")
 
@@ -298,7 +297,7 @@ def _run_writer(ctx: Context, clone: Path, tmp: Path, script: Path, args: list[s
 
 
 def _open_pr(ctx: Context, clone: Path, paths: list[str], *, slug: str, bot_id: int, branch: str, title: str,
-             command_text: str, summary: str, review: str, ai: bool = True) -> None:
+             command_text: str, summary: str, review: str, ai: bool = True) -> str:
     """Commit `paths` on a new branch, push it, open the pull request and assign the requester.
     ai=False: IMGAgent wrote the files from the person's own settings, without a model (G0)."""
     git = lambda *a: subprocess.run(["git", "-C", str(clone), *a], check=True, capture_output=True, text=True)
@@ -322,6 +321,7 @@ def _open_pr(ctx: Context, clone: Path, paths: list[str], *, slug: str, bot_id: 
     except github.GitHubError as e:
         log.warning("could not assign %s: %s", ctx.actor, e)
     ctx.say(f"@{ctx.actor} `{command_text.split(' ', 1)[1]}` is ready for review: {pr['html_url']}")
+    return pr["html_url"]
 
 
 def _first_line(summary: str, fallback: str) -> str:
@@ -398,29 +398,111 @@ def do_update(ctx: Context, job: Job) -> None:
 
 # ------------------------------------------------------------------------------------------ setup
 
-SETUP_FILES = {"reuse": "REUSE.toml", "aisignoff": "SIGNOFF.toml", "docs": "zensical.toml"}
+LICENSE_TEXT = "https://raw.githubusercontent.com/spdx/license-list-data/main/text/{id}.txt"
+
+
+def fetch_license(spdx_id: str) -> str | None:
+    """The text of an SPDX license (for LICENSES/), or None if it can't be fetched."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.+-]*", spdx_id):
+        return None
+    try:
+        with urllib.request.urlopen(LICENSE_TEXT.format(id=spdx_id), timeout=30) as r:
+            return r.read().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        log.warning("could not fetch the license text of %s: %s", spdx_id, e)
+        return None
+
+
+def _name_of(ctx: Context, login: str) -> str:
+    """A GitHub account's display name, or its login."""
+    try:
+        return (ctx.api("GET", f"/users/{login}", ok404=True) or {}).get("name") or login
+    except github.GitHubError:
+        return login
+
+
+def setup_template(ctx: Context, target: str) -> str:
+    """The template comment for a target, with defaults from the repository and the requester."""
+    repo = ctx.payload["repository"]
+    owner, name = ctx.repo.split("/")
+    license = ((repo.get("license") or {}).get("spdx_id") or "").strip()
+    license = None if license in ("", "NOASSERTION", "NONE") else license
+    h, a = ctx.cfg.handle, ctx.actor
+    if target == "reuse":
+        return setup.reuse_template(a, h, holder=_name_of(ctx, owner), license=license)
+    if target == "aisignoff":
+        return setup.signoff_template(a, h, reviewer=_name_of(ctx, a), branch=ctx.default_branch)
+    if target == "citation":
+        return setup.citation_template(a, h, title=name, author=_name_of(ctx, a), license=license,
+                                       url=repo.get("html_url") or f"https://github.com/{ctx.repo}",
+                                       abstract=repo.get("description") or "", keywords=repo.get("topics") or [])
+    return setup.docs_template(a, h, name=name, description=repo.get("description") or "",
+                               url=repo.get("homepage") or f"https://{owner.lower()}.github.io/{name}/")
+
+
+def _exists(ctx: Context, path: str) -> bool:
+    return ctx.api("GET", f"/repos/{ctx.repo}/contents/{path}?ref={ctx.default_branch}", ok404=True) is not None
+
+
+def _already(ctx: Context, target: str) -> None:
+    name = setup.TARGETS[target]
+    fix = f"To change it, use `@{ctx.cfg.handle} update {name}` and say what to change"
+    ctx.say(f"@{ctx.actor} this repository already has a `{name}`, so `setup {target}` leaves it as it is. "
+            f"{fix}{'; `make docs` also rebuilds its nav.' if target == 'docs' else '.'}")
 
 
 def do_setup(ctx: Context, job: Job) -> None:
-    """Create REUSE.toml, SIGNOFF.toml or zensical.toml from the settings in the request; no AI."""
-    target, text = job.args["target"], job.args.get("text", "")
-    name = SETUP_FILES[target]
+    """Post the template for REUSE.toml, SIGNOFF.toml, CITATION.cff or zensical.toml, or finish an open one."""
+    target = job.args["target"]
     command_text = f"@{ctx.cfg.handle} setup {target}"
     if not ctx.can_write(ctx.actor):
         return ctx.refuse(command_text)
-    example = {"reuse": setup.REUSE_EXAMPLE, "aisignoff": setup.SIGNOFF_EXAMPLE}.get(target, "")
-    example = f"\n\nFor example:\n\n{example.format(handle=ctx.cfg.handle)}" if example else ""
-    try:   # read the settings before cloning: a typo costs a reply, not a clone
-        if target == "reuse":
-            if not text.strip():
-                return ctx.say(f"@{ctx.actor} write the annotations for `REUSE.toml` after `{command_text}`.{example}")
-            content, licences = setup.reuse_toml(text)
-        elif target == "aisignoff":
-            args = setup.aisignoff_args(text)
-        else:
-            settings = setup.docs_settings(text)
-    except setup.SetupError as e:
-        return ctx.say(f"@{ctx.actor} `{command_text}`: {e}{example}")
+    if job.args.get("done"):
+        slug, _ = ctx.app.identity(ctx.token())
+        comments = ctx.api("GET", f"/repos/{ctx.repo}/issues/{ctx.number}/comments?per_page=100") or []
+        open_ = [c for c in comments if (c.get("user") or {}).get("login") == f"{slug}[bot]"
+                 and setup.target_of(c.get("body")) == target and setup.DONE in c.get("body", "")]
+        if not open_:
+            return ctx.say(f"@{ctx.actor} there is no open `setup {target}` template here. "
+                           f"Write `{command_text}` to get one.")
+        return _finish_setup(ctx, target, open_[-1])
+    if _exists(ctx, setup.TARGETS[target]):
+        return _already(ctx, target)
+    ctx.react()
+    ctx.say(setup_template(ctx, target))
+
+
+def do_setup_done(ctx: Context, job: Job) -> None:
+    """The "Done" box of a template was ticked: check that the template is IMGAgent's, then finish it."""
+    target = job.args["target"]
+    if not ctx.can_write(ctx.actor):
+        return ctx.refuse(f"@{ctx.cfg.handle} setup {target}")
+    slug, _ = ctx.app.identity(ctx.token())
+    comment = ctx.api("GET", f"/repos/{ctx.repo}/issues/comments/{job.args['comment_id']}", ok404=True)
+    if not comment or (comment.get("user") or {}).get("login") != f"{slug}[bot]" \
+            or setup.target_of(comment.get("body")) != target or not setup.is_done(comment["body"]):
+        log.info("setup-done: comment %s is not a ticked %s template of IMGAgent's", job.args["comment_id"], target)
+        return
+    _finish_setup(ctx, target, comment)
+
+
+def _kind_in(clone: Path):
+    def kind(path: str) -> bool | None:
+        found = find_target(clone, path)
+        return None if found is None else found.is_dir()
+    return kind
+
+
+def _finish_setup(ctx: Context, target: str, comment: dict) -> None:
+    body, name = comment["body"], setup.TARGETS[target]
+    edit = lambda text: ctx.api("PATCH", f"/repos/{ctx.repo}/issues/comments/{comment['id']}", {"body": text})
+
+    def problem(text: str) -> None:
+        edit(setup.with_problem(body, text))
+        ctx.say(f"@{ctx.actor} the `setup {target}` template above has a problem: {text} I unticked **Done**: "
+                f"fix it and tick **Done** again.")
+
+    form = setup.read_form(body)
     ctx.react()
     slug, bot_id = ctx.app.identity(ctx.token())
     with tempfile.TemporaryDirectory(prefix="imgagent-") as tmp:
@@ -428,42 +510,50 @@ def do_setup(ctx: Context, job: Job) -> None:
         clone = tmp / "repo"
         github.clone(ctx.repo, ctx.token(), clone, ref=ctx.default_branch)
         if (clone / name).exists() or (clone / name).is_symlink():
-            fix = f"To change it, use `@{ctx.cfg.handle} update {name}` and say what to change"
-            fix += "; `make docs` also rebuilds its nav." if target == "docs" else "."
-            return ctx.say(f"@{ctx.actor} this repository already has a `{name}`, so `setup {target}` leaves it "
-                           f"as it is. {fix}")
-        paths = [name]
-        if target == "reuse":
-            (clone / name).write_text(content, encoding="utf-8")
-            summary = [f"Creates `REUSE.toml` from the annotations in the request, written by IMGAgent without AI."]
-            if gone := [i for i in licences if not (clone / "LICENSES" / f"{i}.txt").exists()]:
-                summary.append(f"\n`LICENSES/` has no text yet for {', '.join(f'`{i}`' for i in gone)}: add it with "
-                               f"`pipx run reuse download {' '.join(gone)}` before `reuse lint` passes.")
-            review = "Check every path, copyright and license before merging."
-        elif target == "aisignoff":
-            r = _run(["aisignoff", "init", *args], clone, {}, timeout=120)
-            if r.returncode or not (clone / name).is_file():
-                said = (r.stdout + r.stderr).strip()[-1500:] or "no output"
-                return ctx.say(f"@{ctx.actor} `aisignoff init` refused these settings:\n\n```\n{said}\n```{example}")
-            summary = [f"Creates `SIGNOFF.toml` with `aisignoff init {' '.join(args)}`".rstrip() + ", run by IMGAgent without AI."]
-            if not args:
-                summary.append("\nIt is the commented template: add the `[[annotations]]` for this repository's "
-                               "files before `aisignoff lint` passes.")
-            review = "Check the levels and names before merging: they are what the repository declares."
-        else:
-            env = {**_docs_env(ctx, clone), "SUMMARY_FILE": str(tmp / "summary.md")}
+            edit(setup.finished(body, f"not needed, `{name}` exists now"))
+            return _already(ctx, target)
+        paths, notes = [name], []
+        try:
+            if target == "reuse":
+                content, licences = setup.reuse_annotations(form, _kind_in(clone))
+                (clone / name).write_text(content, encoding="utf-8")
+                for spdx in licences:
+                    dest = clone / "LICENSES" / f"{spdx}.txt"
+                    if dest.exists():
+                        continue
+                    text = None if spdx.startswith("LicenseRef-") else fetch_license(spdx)
+                    if text is None:
+                        notes.append(f"- `LICENSES/{spdx}.txt` is missing: add the license text by hand.")
+                        continue
+                    dest.parent.mkdir(exist_ok=True)
+                    dest.write_text(text, encoding="utf-8")
+                    notes.append(f"- Added `LICENSES/{spdx}.txt` from the SPDX license list.")
+                if (clone / "LICENSES").is_dir():
+                    paths.append("LICENSES")
+            elif target == "aisignoff":
+                (clone / name).write_text(setup.signoff_toml(form), encoding="utf-8")
+            elif target == "citation":
+                (clone / name).write_text(setup.citation_cff(form), encoding="utf-8")
+            else:
+                settings = setup.docs_settings(form)
+        except setup.SetupError as e:
+            return problem(str(e))
+        if target == "docs":
+            env = {**_docs_env(ctx, clone), **settings, "SUMMARY_FILE": str(tmp / "summary.md")}
             env.pop("ANTHROPIC_API_KEY")
-            for key, var in (("name", "DOCS_PROJECT"), ("description", "DOCS_ABOUT"), ("url", "DOCS_URL")):
-                if key in settings:
-                    env[var] = "" if key == "url" and settings[key].lower() == "none" else settings[key]
             r = _run([sys.executable, str(SCRIPTS / "docs" / "write_docs.py"), "setup"], clone, env, timeout=120)
             if r.returncode or not (tmp / "summary.md").is_file():
                 raise RuntimeError("write_docs.py setup failed")
-            summary = [(tmp / "summary.md").read_text(encoding="utf-8")]
+            notes.append((tmp / "summary.md").read_text(encoding="utf-8"))
             paths = ["docs", name]
-            review = "Check the site name, description, address and nav before merging."
-        _open_pr(ctx, clone, paths, slug=slug, bot_id=bot_id, branch=f"{slug}/setup-{target}-{secrets.token_hex(4)}",
-                 title=f"Set up {name}", command_text=command_text, summary="\n".join(summary), review=review, ai=False)
+        summary = "\n".join([f"Creates `{name}` from the [`setup {target}` template]({comment['html_url']}) that "
+                             f"@{ctx.actor} filled in. IMGAgent wrote it from the form, without AI.", "", *notes])
+        url = _open_pr(ctx, clone, paths, slug=slug, bot_id=bot_id,
+                       branch=f"{slug}/setup-{target}-{secrets.token_hex(4)}", title=f"Set up {name}",
+                       command_text=f"@{ctx.cfg.handle} setup {target}", summary=summary, ai=False,
+                       review=f"Check `{name}` before merging: it is what the repository will declare.")
+    edit(setup.finished(body, url))
+
 
 
 # ---------------------------------------------------------------------------------------- signoff
@@ -535,7 +625,7 @@ def do_signoff(ctx: Context, job: Job) -> None:
                                "SIGNOFF_ASSISTANT_COMMAND": command})
 
 
-HANDLERS = {"help": do_help, "ask": do_ask, "update": do_update, "make": do_make, "setup": do_setup,
+HANDLERS = {"help": do_help, "ask": do_ask, "update": do_update, "make": do_make, "setup": do_setup, "setup-done": do_setup_done,
             "signoff": do_signoff, "signoff-form": do_signoff_form}
 
 

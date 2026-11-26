@@ -9,7 +9,7 @@ You talk to IMGAgent by writing a command in an issue or a comment. This page co
 | `@IMGAgent ask <folders> [with <folders>]` and a question | Claude answers from the files in those folders | [ask](ask.md) |
 | `@IMGAgent update <folders> [with <folders>]` and a task | Claude edits existing files in the folders and at the top level, reading the `with` folders; IMGAgent opens a pull request | [update](update.md) |
 | `@IMGAgent make docs [with <folders>]` and a hint | Claude rebuilds `docs/` from the code (or only from the `with` folders); IMGAgent opens a pull request | [make docs](make-docs.md) |
-| `@IMGAgent setup reuse\|aisignoff\|docs` and settings | creates `REUSE.toml`, `SIGNOFF.toml` or `zensical.toml` from your settings, without AI; IMGAgent opens a pull request | [setup](setup.md) |
+| `@IMGAgent setup reuse\|aisignoff\|citation\|docs` | a template for `REUSE.toml`, `SIGNOFF.toml`, `CITATION.cff` or `zensical.toml` with defaults filled in; ticking **Done** opens a pull request, without AI | [setup](setup.md) |
 | `@IMGAgent signoff` and your words | records how files were made and reviewed: a `SIGNOFF.toml` pull request | [signoff](signoff.md) |
 | `@IMGAgent help` | the list of commands | |
 
@@ -32,7 +32,7 @@ the docs still describe the old commands; bring them in line with the code
 ```
 
 Action
-:   `ask`, `update`, `make`, `setup` or `help`. Case does not matter. `setup` takes `reuse`, `aisignoff` or `docs` instead of folders, and settings instead of text; see [setup](setup.md).
+:   `ask`, `update`, `make`, `setup` or `help`. Case does not matter. `setup` takes `reuse`, `aisignoff`, `citation` or `docs` instead of folders, and no text; see [setup](setup.md).
 
 Folders
 :   A comma-separated list of folders or files of the repository, as relative paths such as `docs`, `src/package` or `pyproject.toml`. Spaces around the commas are fine (`docs, src`). A path may be wrapped in backticks, and a leading `./` or trailing `/` is dropped. Duplicates are ignored.

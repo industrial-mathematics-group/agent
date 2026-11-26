@@ -6,8 +6,10 @@ Commands are "@IMGAgent <action> <paths> [with <paths>] [text]":
     update <paths> [with <paths>]    small edits to existing files under the first paths and the top-level
                                      files; the paths after "with" are read-only context
     make docs [with <paths>]         build the docs from the code (all of it, or only the "with" paths)
-    setup reuse|aisignoff|docs       create REUSE.toml, SIGNOFF.toml or zensical.toml from the text below
-                                     (no AI: the text is read as "key: value" lines, see imgagent/setup.py)
+    setup reuse|aisignoff|citation|docs
+                                     post a template for REUSE.toml, SIGNOFF.toml, CITATION.cff or zensical.toml;
+                                     ticking its "Done" box (or "setup <target> done") opens the pull request
+                                     (no AI, see imgagent/setup.py)
 
 <paths> is a comma-separated list. The question, task or hint follows on the same line or below.
     signoff ...               the signoff assistant (anywhere in the text, see signoff_pattern)
@@ -21,7 +23,9 @@ from dataclasses import dataclass, field
 
 FORM_MARKER = "### What should be recorded?"   # issues made with the form "Signoff: declare or attest files"
 MAKE_TARGETS = ("docs",)
-SETUP_TARGETS = ("reuse", "aisignoff", "docs")
+SETUP_TARGETS = ("reuse", "aisignoff", "citation", "docs")
+SETUP_MARKER = re.compile(r"<!-- imgagent-setup:([a-z]+) -->")
+SETUP_DONE = re.compile(r"\[[xX]\][^\n]*<!-- f:done -->")
 
 # A path inside the repository: plain names separated by "/", no "..", no ".git", no glob characters.
 _SEGMENT = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$|^\.[A-Za-z0-9_][A-Za-z0-9._-]*$")
@@ -29,12 +33,12 @@ _SEGMENT = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$|^\.[A-Za-z0-9_][A-Za-z0-9.
 
 @dataclass
 class Job:
-    kind: str                     # ask | update | make | setup | signoff | signoff-form | help
+    kind: str                     # ask | update | make | setup | setup-done | signoff | signoff-form | help
     args: dict = field(default_factory=dict)
 
     def key(self, repo: str, number: int) -> str:
         """Jobs with the same key run one after the other. Jobs that open pull requests share one per repository."""
-        return f"{repo}#write" if self.kind in ("make", "update", "setup") else f"{repo}#{number}"
+        return f"{repo}#write" if self.kind in ("make", "update", "setup", "setup-done") else f"{repo}#{number}"
 
 
 def clean_target(raw: str) -> str | None:
@@ -65,7 +69,7 @@ def signoff_pattern(handle: str) -> re.Pattern:
 _LIST = r"[^\s,]+(?:[ \t]*,[ \t]*[^\s,]+)*"
 _SPEC = r"[ \t]+(?P<targets>" + _LIST + r")(?:[ \t]+with[ \t]+(?P<context>" + _LIST + r"))?"
 USAGE = {"ask": "ask <folders> [with <folders>]", "update": "update <folders> [with <folders>]",
-         "make": "make docs [with <folders>]", "setup": "setup reuse|aisignoff|docs"}
+         "make": "make docs [with <folders>]", "setup": "setup reuse|aisignoff|citation|docs"}
 
 
 def _paths(raw: str | None) -> tuple[list[str], str | None]:
@@ -85,14 +89,14 @@ def _paths(raw: str | None) -> tuple[list[str], str | None]:
 
 def action_job(action: str, targets_raw: str | None, context_raw: str | None, rest: str) -> Job:
     """The job for "<action> <targets> [with <context>]" and its text, or help explaining what is wrong."""
-    usage = f"`{USAGE[action]}`, then the {dict(ask='question', update='task', make='hint', setup='settings')[action]}"
     if action == "setup":
         target = (targets_raw or "").strip().strip("`").lower()
         if target not in SETUP_TARGETS or context_raw:
             what = f"not `{targets_raw}`" if targets_raw else "and nothing else"
-            return Job("help", {"problem": f"`setup` knows `reuse` (REUSE.toml), `aisignoff` (SIGNOFF.toml) "
-                                           f"and `docs` (zensical.toml), {what}: {usage}."})
-        return Job("setup", {"target": target, "text": rest})
+            return Job("help", {"problem": f"`setup` knows `reuse` (REUSE.toml), `aisignoff` (SIGNOFF.toml), "
+                                           f"`citation` (CITATION.cff) and `docs` (zensical.toml), {what}."})
+        return Job("setup", {"target": target, "done": rest.strip().lower().rstrip(".!").startswith("done")})
+    usage = f"`{USAGE[action]}`, then the {dict(ask='question', update='task', make='hint')[action]}"
     if not targets_raw:
         return Job("help", {"problem": f"`{action}` needs a folder: {usage}."})
     targets, bad = _paths(targets_raw)
@@ -169,9 +173,14 @@ def route(event: str, payload: dict, handle: str = "IMGAgent", signoff_form: boo
     signoff = signoff_pattern(handle)
 
     if event == "issue_comment" and action == "edited":
-        # Fixing a command by editing the comment runs it, once: only when the old text had no command that ran.
         body = (payload.get("comment") or {}).get("body") or ""
         before = ((payload.get("changes") or {}).get("body") or {}).get("from")
+        # A setup template of IMGAgent's whose "Done" box was just ticked (the job checks who wrote the comment).
+        if (m := SETUP_MARKER.search(body)) and ((payload.get("comment") or {}).get("user") or {}).get("type") == "Bot":
+            if m[1] in SETUP_TARGETS and SETUP_DONE.search(body) and not SETUP_DONE.search(before or ""):
+                return Job("setup-done", {"target": m[1], "comment_id": payload["comment"]["id"]})
+            return None
+        # Fixing a command by editing the comment runs it, once: only when the old text had no command that ran.
         job = find_command(body, handle)
         if before is None or not job or job.kind == "help":
             return None
